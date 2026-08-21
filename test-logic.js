@@ -479,6 +479,27 @@ check("单段行业原样", extractSectorName("金融业"), "金融业");
 check("空值→空", extractSectorName(""), "");
 check("null→空", extractSectorName(null), "");
 
+console.log("== 测试19：名称智能更新规则 ==");
+// 与 index.html shouldRename/cleanRealName 一致
+const cleanRealName = n => String(n||"").replace(/-U$/,"").replace(/-C$/,"").trim();
+const shouldRename = (u, r) => {
+  const uu = String(u||"").trim(), rr = cleanRealName(r);
+  if(!uu || !rr) return false;
+  if(uu === rr) return false;
+  if(rr.includes(uu) || uu.includes(rr)) return false;
+  return true;
+};
+check("麦格数据 vs 麦格米特 → 改", shouldRename("麦格数据","麦格米特"), true);
+check("赛维电子 vs 赛微电子 → 改", shouldRename("赛维电子","赛微电子"), true);
+check("完全一致不改", shouldRename("联创光电","联创光电"), false);
+check("简称包含不改(消费ETF⊂消费ETF华夏)", shouldRename("消费ETF","消费ETF华夏"), false);
+check("简称包含不改(恒生科技⊂恒生科技ETF博时)", shouldRename("恒生科技","恒生科技ETF博时"), false);
+check("简称包含不改(金斯瑞⊂金斯瑞生物科技)", shouldRename("金斯瑞","金斯瑞生物科技"), false);
+check("-U清洗后相等不改", shouldRename("迈威生物","迈威生物-U"), false);
+check("-U清洗: 迈威生物-U→迈威生物", cleanRealName("迈威生物-U"), "迈威生物");
+check("空真实名不改", shouldRename("消费ETF",""), false);
+check("空用户名不改", shouldRename("","联创光电"), false);
+
 console.log("\n==================");
 console.log("通过 "+pass+" 项，失败 "+fail+" 项");
 process.exit(fail>0?1:0);

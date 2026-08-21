@@ -317,6 +317,7 @@
     <div style="display:flex;gap:10px;flex-wrap:wrap">
       <button class="btn primary" id="btnAddHolding">＋ 添加持仓（不发流水）</button>
       <button class="btn" id="btnAutoSector" title="按公开数据（东财数据中心·证监会行业分类）自动填充行业为空的持仓">按公开信息自动填行业</button>
+      <button class="btn" id="btnFixNames" title="按证券代码拉取真实简称并更新名称（腾讯行情接口；简称互相包含时保留你的叫法）">按代码更新名称</button>
     </div>
   </section>
 
@@ -567,9 +568,9 @@ const SEED = {
     {name:"惠城环保", shares:200,   price:72.80, cost:80.80,  code:"sz300779", sector:"废弃资源综合利用业"},
     {name:"ST京蓝",   shares:1000,  price:6.11,  cost:4.80,   code:"sz000711", sector:"废弃资源综合利用业"},
     {name:"新恒汇",   shares:1500,  price:44.68, cost:80.59,  code:"sz301678", sector:"计算机、通信和其他电子设备制造业"},
-    {name:"麦格数据", shares:700,   price:128.28,cost:60.00,  code:"sz002851", sector:"电气机械和器材制造业"},
+    {name:"麦格米特", shares:700,   price:128.28,cost:60.00,  code:"sz002851", sector:"电气机械和器材制造业"},
     {name:"金斯瑞",   shares:1000,  price:33.26, cost:16.82,  code:"hk01548",  sector:""},
-    {name:"赛维电子", shares:1200,  price:31.55, cost:47.00,  code:"sz300456", sector:"计算机、通信和其他电子设备制造业"},
+    {name:"赛微电子", shares:1200,  price:31.55, cost:47.00,  code:"sz300456", sector:"计算机、通信和其他电子设备制造业"},
     {name:"恒生科技", shares:22800, price:0.61,  cost:0.657,  code:"sz159742", sector:""}
   ],
   trades: [
@@ -787,6 +788,68 @@ function takeSnapshot(){
 // 打开页面时自动存档（当天未存才存）
 function maybeSnapshot(){
   if(!state.snapshots.some(s=>s.date===today())) takeSnapshot();
+}
+
+/* ================= 名称按代码生成 ================= */
+// 清洗：去掉科创板未盈利标记 "-U" 等后缀
+function cleanRealName(n){
+  return String(n||"").replace(/-U$/,"").replace(/-C$/,"").trim();
+}
+// 智能判断是否需要把用户名称改为真实简称：
+// 真实简称清洗后与用户名称相同 / 互相包含（简称差异，如"消费ETF"⊂"消费ETF华夏"）→ 保留用户叫法；
+// 完全不符（代码对应错误，如"麦格数据"vs"麦格米特"）→ 需要更新
+function shouldRename(userName, realName){
+  const u = String(userName||"").trim(), r = cleanRealName(realName);
+  if(!u || !r) return false;
+  if(u === r) return false;
+  if(r.includes(u) || u.includes(r)) return false;
+  return true;
+}
+// 按代码查询真实简称（腾讯行情接口，GBK 编码由 script charset 解码，f[1] 为名称）
+function fetchRealName(code){
+  return new Promise((resolve,reject)=>{
+    const s = document.createElement("script");
+    const timer = setTimeout(()=>{ cleanup(); reject(new Error("名称查询超时")); }, 8000);
+    s.onerror = ()=>{ cleanup(); reject(new Error("名称查询失败")); };
+    s.onload = ()=>{
+      cleanup();
+      const raw = window["v_"+code];
+      if(!raw) return reject(new Error("未找到该代码的行情"));
+      const f = String(raw).split("~");
+      const name = (f[1]||"").trim();
+      if(!name) return reject(new Error("名称字段为空"));
+      resolve(cleanRealName(name));
+    };
+    s.charset = "GBK";
+    s.src = "https://qt.gtimg.cn/q="+code;
+    document.head.appendChild(s);
+    function cleanup(){ clearTimeout(timer); s.remove(); }
+  });
+}
+// 一键按代码更新名称：先拉取全部真实简称，列变更清单确认后统一应用
+async function autoFixNames(){
+  const targets = state.holdings.filter(h=>h.code);
+  if(targets.length===0) return toast("没有已填代码的持仓");
+  const btn = $("btnFixNames");
+  if(btn){ btn.disabled = true; btn.textContent = "获取中…"; }
+  const pending = [], failed = [];
+  for(const h of targets){
+    try{
+      const real = await fetchRealName(h.code);
+      if(shouldRename(h.name, real)) pending.push({h, real});
+    }catch(e){ failed.push(h.name); }
+    await sleep(150);
+  }
+  if(btn){ btn.disabled = false; btn.textContent = "按代码更新名称"; }
+  if(pending.length===0){
+    toast("所有名称与代码一致，无需更新"+(failed.length?"（"+failed.length+" 个查询失败）："+failed.join("、"):""));
+    return;
+  }
+  const list = pending.map(p=>p.h.name+" → "+p.real).join("\n");
+  if(!confirm("将按代码更新 "+pending.length+" 个证券名称：\n\n"+list+"\n\n确认更新？（历史交易流水名称保持不变）")) return;
+  for(const p of pending) p.h.name = p.real;
+  save(); renderAll();
+  toast("已按代码更新 "+pending.length+" 个名称");
 }
 
 /* ================= 行业自动填充 ================= */
@@ -1915,6 +1978,8 @@ $("klineModal").addEventListener("click", e=>{ if(e.target===e.currentTarget) $(
 
 /* 行业自动填充 */
 $("btnAutoSector").addEventListener("click", ()=>autoFillSectors());
+/* 名称按代码更新 */
+$("btnFixNames").addEventListener("click", ()=>autoFixNames());
 
 /* 添加持仓弹窗 */
 $("btnAddHolding").addEventListener("click", ()=>{
