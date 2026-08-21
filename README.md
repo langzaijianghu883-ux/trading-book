@@ -2,6 +2,10 @@
 
 单文件本地网站：**双击 `index.html` 即可使用**，无需安装、无需服务器。所有数据保存在浏览器本地（localStorage）；**实时行情与舆情功能需要联网**（免费公开接口，无需注册）。
 
+**线上地址（GitHub Pages，手机/电脑均可访问）**：https://langzaijianghu883-ux.github.io/trading-book/
+
+> 更新网站：本地修改 `index.html` 后执行 `git add . && git commit -m "更新" && git push`，约 1 分钟后线上生效。
+
 ## 使用方式
 
 1. 双击打开 `index.html`（建议使用 Chrome / Edge）
