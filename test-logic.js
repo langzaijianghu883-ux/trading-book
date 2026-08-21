@@ -541,11 +541,10 @@ function parseBatchLine(line){
     const mPrice=rest.match(/价\s*[:：]?\s*(\d+(?:\.\d+)?)|(\d+\.\d{1,3})/);
     if(mPrice){ price=+mPrice[1]||+mPrice[2]; rest=rest.replace(mPrice[0]," "); }
   }
-  const mFee=rest.match(/费\s*[:：]?\s*(\d+(?:\.\d+)?)/);
+  const mFee=rest.match(/手续费\s*[:：]?\s*(\d+(?:\.\d+)?)|费\s*[:：]?\s*(\d+(?:\.\d+)?)/);
   let fee=0;
-  if(mFee){ fee=+mFee[1]; rest=rest.replace(mFee[0]," "); }
-  const mName=rest.match(/[^\s\d|,，。、:：;；@＠%()（）]+/);
-  const name=mName?mName[0].trim():"";
+  if(mFee){ fee=+mFee[1]||+mFee[2]; rest=rest.replace(mFee[0]," "); }
+  const name=rest.replace(/[，。、|,.:：;；@＠%()（）\[\]【】"“”'`~!！?？+\-*/\\\d]+/g," ").replace(/\s+/g,"").trim();
   if(!name||!(price>0)||!(shares>0)) return null;
   return {date,name,side,price,shares,fee};
 }

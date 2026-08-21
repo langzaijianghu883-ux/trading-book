@@ -396,7 +396,22 @@
     </div>
 
     <div class="panel" style="margin-bottom:12px">
-      <h3>批量录入 <span class="hint">把交易记录截图发给 NewMax 对话识别后，把生成的标准 JSON 粘贴到这里，或直接粘贴券商复制的成交明细文本</span></h3>
+      <h3>截图识别 <span class="hint">上传 / 拖拽 / Ctrl+V 粘贴券商成交记录截图，网页内直接 OCR 识别（首次使用需下载识别引擎约 7MB；建议在线上 https 环境使用）</span></h3>
+      <div id="ocrZone" style="border:1px dashed var(--line);border-radius:10px;padding:24px;text-align:center;color:var(--muted);cursor:pointer;font-size:13px">
+        📷 点击选择图片 · 拖拽到此处 · 或直接 Ctrl+V 粘贴截图
+      </div>
+      <input type="file" id="ocrFile" class="file-input" accept="image/*">
+      <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;align-items:center">
+        <button class="btn primary" id="btnOcr" style="display:none">开始识别</button>
+        <button class="btn mini" id="btnOcrClear" style="display:none">清除图片</button>
+        <span class="sent-loading" id="ocrLoading" style="display:none"><span class="spinner"></span> <span id="ocrStatus">准备中…</span></span>
+      </div>
+      <div id="ocrPreview" style="margin-top:10px;display:none"></div>
+      <div id="ocrResult" style="margin-top:8px"></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:12px">
+      <h3>批量录入 <span class="hint">截图识别结果自动填入此处；也可粘贴 NewMax 对话生成的 JSON 或券商复制的成交明细文本</span></h3>
       <textarea id="batchText" rows="4" style="width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:10px;font-size:13px;font-family:inherit;outline:none;resize:vertical" placeholder="示例：&#10;[{&quot;date&quot;:&quot;2026-08-21&quot;,&quot;name&quot;:&quot;迈威生物&quot;,&quot;side&quot;:&quot;buy&quot;,&quot;price&quot;:32.59,&quot;shares&quot;:300,&quot;fee&quot;:0,&quot;note&quot;:&quot;截图录入&quot;}]&#10;或文本行：2026-08-21 迈威生物 买入 32.59 300股 手续费0"></textarea>
       <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;align-items:center">
         <button class="btn" id="btnParseBatch">解析预览</button>
@@ -1692,16 +1707,34 @@ function parseBatchLine(line){
     const mPrice = rest.match(/价\s*[:：]?\s*(\d+(?:\.\d+)?)|(\d+\.\d{1,3})/);
     if(mPrice){ price = +mPrice[1] || +mPrice[2]; rest = rest.replace(mPrice[0]," "); }
   }
-  const mFee = rest.match(/费\s*[:：]?\s*(\d+(?:\.\d+)?)/);
+  const mFee = rest.match(/手续费\s*[:：]?\s*(\d+(?:\.\d+)?)|费\s*[:：]?\s*(\d+(?:\.\d+)?)/);
   let fee = 0;
-  if(mFee){ fee = +mFee[1]; rest = rest.replace(mFee[0]," "); }
-  const mName = rest.match(/[^\s\d|,，。、:：;；@＠%()（）]+/);
-  const name = mName ? mName[0].trim() : "";
+  if(mFee){ fee = +mFee[1] || +mFee[2]; rest = rest.replace(mFee[0]," "); }
+  // 名称：其余字段全部移除后，清洗标点与内部空白（兼容 OCR 的"成 都 先导"）
+  const name = rest.replace(/[，。、|,.:：;；@＠%()（）\[\]【】"“”'`~!！?？+\-*/\\\d]+/g," ").replace(/\s+/g,"").trim();
   if(!name || !(price>0) || !(shares>0)) return null;
   return {date, name, side, price, shares, fee, note:"批量录入"};
 }
+// OCR 词级重建：把 tesseract 输出的词（含坐标）按行聚类、行内按 x 排序，
+// 词间加空格拼成行文本（消除中文空格错位与数字粘连，供 parseBatchLine 解析）
+function rebuildOcrLines(words){
+  if(!words || !words.length) return [];
+  const sorted = [...words].filter(w=>w && w.text && w.text.trim()).sort((a,b)=>a.bbox.y0-b.bbox.y0);
+  const lines = [];
+  let cur = null, curY = -1e9;
+  for(const w of sorted){
+    if(cur && w.bbox.y0 - curY < 12){   // 同一行（阈值按字号粗估）
+      cur.push(w);
+    }else{
+      cur = [w];
+      lines.push(cur);
+    }
+    curY = Math.max(curY, w.bbox.y1);
+  }
+  return lines.map(ws=>ws.sort((a,b)=>a.bbox.x0-b.bbox.x0).map(w=>w.text.trim()).join(" "));
+}
 let batchItems = [];
-$("btnParseBatch").addEventListener("click", ()=>{
+function applyParse(){
   const text = $("batchText").value;
   if(!text.trim()) return toast("请先粘贴识别结果或成交明细文本");
   const r = parseTradeText(text);
@@ -1724,7 +1757,8 @@ $("btnParseBatch").addEventListener("click", ()=>{
   </tr>`).join("") + `</tbody></table>`;
   $("btnApplyBatch").style.display = "inline-block";
   $("batchHint").textContent = "解析出 "+r.items.length+" 笔"+(r.errors.length?"（"+r.errors.length+" 行失败，见上方提示）":"")+"，请核对后确认录入";
-});
+}
+$("btnParseBatch").addEventListener("click", applyParse);
 $("btnApplyBatch").addEventListener("click", ()=>{
   if(!batchItems.length) return;
   let ok = 0; const fails = [];
@@ -1737,6 +1771,115 @@ $("btnApplyBatch").addEventListener("click", ()=>{
   $("btnApplyBatch").style.display="none"; $("batchHint").textContent=""; batchItems=[];
   toast("批量录入完成："+ok+" 笔成功"+(fails.length?"，"+(fails.length+" 笔失败："+fails.join("；")):""));
   if(ok) switchPage("dashboard");
+});
+
+/* ================= 截图识别（网页内 OCR） ================= */
+let ocrImage = null;
+function loadScript(src){
+  return new Promise((res,rej)=>{
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = res;
+    s.onerror = ()=>rej(new Error("脚本加载失败："+src));
+    document.head.appendChild(s);
+  });
+}
+function showOcrImage(img){
+  ocrImage = img;
+  const box = $("ocrPreview");
+  box.style.display = "block";
+  box.innerHTML = `<img src="${img.src}" style="max-width:100%;max-height:200px;border:1px solid var(--line);border-radius:8px">`;
+  $("btnOcr").style.display = "inline-block";
+  $("btnOcrClear").style.display = "inline-block";
+  $("ocrResult").innerHTML = "";
+}
+function loadOcrFile(file){
+  if(!file || !/^image\//.test(file.type)) return toast("请选择图片文件");
+  const reader = new FileReader();
+  reader.onload = ()=>{
+    const img = new Image();
+    img.onload = ()=>showOcrImage(img);
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+}
+// 预处理：放大 2 倍 + 灰度二值化（浅底深字截图效果最佳）
+function preprocessImage(img){
+  const scale = 2;
+  const cv = document.createElement("canvas");
+  cv.width = img.naturalWidth*scale;
+  cv.height = img.naturalHeight*scale;
+  const ctx = cv.getContext("2d");
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0,0,cv.width,cv.height);
+  ctx.drawImage(img, 0, 0, cv.width, cv.height);
+  const id = ctx.getImageData(0,0,cv.width,cv.height);
+  const d = id.data;
+  for(let i=0;i<d.length;i+=4){
+    const g = d[i]*0.299 + d[i+1]*0.587 + d[i+2]*0.114;
+    const v = g<140 ? 0 : 255;
+    d[i]=d[i+1]=d[i+2]=v;
+  }
+  ctx.putImageData(id,0,0);
+  return cv;
+}
+async function runOcr(){
+  if(!ocrImage) return;
+  $("ocrLoading").style.display = "flex";
+  $("btnOcr").style.display = "none";
+  $("ocrStatus").textContent = "正在加载识别引擎（首次约需下载 7MB）…";
+  try{
+    if(!window.Tesseract) await loadScript("./tess/tesseract.min.js");
+    $("ocrStatus").textContent = "正在初始化识别引擎…";
+    const worker = await window.Tesseract.createWorker("chi_sim", 1, {
+      langPath: "./tess/",
+      corePath: "./tess/",
+      workerPath: "./tess/worker.min.js"
+    });
+    $("ocrStatus").textContent = "正在识别图片…";
+    const { data } = await worker.recognize(preprocessImage(ocrImage));
+    await worker.terminate();
+    const lines = rebuildOcrLines(data.words);
+    const text = lines.join("\n");
+    $("ocrResult").innerHTML = `<div class="form-tip" style="margin-bottom:6px">✅ 识别完成（${lines.length} 行），结果已填入下方「批量录入」并自动解析，请核对后录入</div>
+      <details><summary style="cursor:pointer;font-size:12px;color:var(--muted)">查看原始识别文本</summary><pre style="white-space:pre-wrap;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12px;color:var(--muted);margin-top:6px;max-height:180px;overflow:auto">${esc(text)}</pre></details>`;
+    $("batchText").value = text;
+    switchPage("trades");
+    applyParse();
+  }catch(e){
+    $("ocrResult").innerHTML = `<div class="sent-err">识别失败：${esc(e.message)}<br>提示：识别引擎从本站 tess/ 目录加载，请确认网络正常；本地双击打开（file://）可能受浏览器安全限制，建议用线上地址 https://langzaijianghu883-ux.github.io/trading-book/</div>`;
+  }finally{
+    $("ocrLoading").style.display = "none";
+  }
+}
+$("ocrZone").addEventListener("click", ()=>$("ocrFile").click());
+$("ocrFile").addEventListener("change", e=>{ loadOcrFile(e.target.files[0]); e.target.value=""; });
+$("ocrZone").addEventListener("dragover", e=>{ e.preventDefault(); e.currentTarget.style.borderColor = "var(--blue)"; });
+$("ocrZone").addEventListener("dragleave", e=>{ e.currentTarget.style.borderColor = ""; });
+$("ocrZone").addEventListener("drop", e=>{
+  e.preventDefault();
+  e.currentTarget.style.borderColor = "";
+  loadOcrFile(e.dataTransfer.files && e.dataTransfer.files[0]);
+});
+document.addEventListener("paste", e=>{
+  if(e.target.matches("input,textarea,select")) return;
+  const items = e.clipboardData && e.clipboardData.items;
+  if(!items) return;
+  for(const it of items){
+    if(it.type.startsWith("image/")){
+      const f = it.getAsFile();
+      if(f){ loadOcrFile(f); e.preventDefault(); return; }
+    }
+  }
+});
+$("btnOcr").addEventListener("click", runOcr);
+$("btnOcrClear").addEventListener("click", ()=>{
+  ocrImage = null;
+  $("ocrPreview").style.display = "none";
+  $("ocrPreview").innerHTML = "";
+  $("btnOcr").style.display = "none";
+  $("btnOcrClear").style.display = "none";
+  $("ocrResult").innerHTML = "";
 });
 
 /* ================= 事件 ================= */
