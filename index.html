@@ -3,6 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0e1218">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-180.png">
 <!-- 关键：东方财富接口会拒绝带非白名单 Referer 的请求（HTTP 567），
      页面级 no-referrer 让 fetch/script 请求不带 Referer，接口才会放行 -->
 <meta name="referrer" content="no-referrer">
@@ -215,6 +219,19 @@
   .sent-err{color:#ff7a6e;font-size:12px;padding:6px 0}
   .sent-note{font-size:11.5px;color:var(--muted);line-height:1.7;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin-bottom:12px}
   .sent-note b{color:var(--text)}
+
+  /* ===== K线弹窗 ===== */
+  #klinePeriod{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-bottom:12px}
+  #klinePeriod button{border:0;background:var(--panel2);color:var(--muted);padding:6px 20px;cursor:pointer;font-size:13px;font-family:inherit}
+  #klinePeriod button.active{background:var(--blue-bg);color:var(--blue);font-weight:600}
+
+  /* ===== 行业分布 ===== */
+  .sector-bars{display:flex;flex-direction:column;gap:8px}
+  .sector-row{display:flex;align-items:center;gap:10px;font-size:12.5px}
+  .sector-row .nm{width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0}
+  .sector-row .bar{flex:1;height:16px;background:var(--panel2);border-radius:4px;overflow:hidden}
+  .sector-row .bar i{display:block;height:100%;border-radius:4px;background:linear-gradient(90deg,#4d9fff,#7b5cff)}
+  .sector-row .mv{width:92px;text-align:right;font-variant-numeric:tabular-nums;flex-shrink:0}
 </style>
 </head>
 <body>
@@ -227,8 +244,10 @@
       <button data-page="holdings">持仓</button>
       <button data-page="trades">交易流水</button>
       <button data-page="sentiment">舆情</button>
+      <button data-page="stats">统计</button>
     </nav>
     <div class="head-actions">
+      <button class="btn" id="btnCsv" title="导出流水为 CSV（Excel 可直接打开）">导出CSV</button>
       <button class="btn" id="btnExport" title="导出全部数据为 JSON 备份文件">导出备份</button>
       <button class="btn" id="btnImport">导入</button>
       <button class="btn danger" id="btnReset">重置</button>
@@ -277,6 +296,11 @@
           <table class="tbl" id="overviewTable"></table>
         </div>
       </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:14px">
+      <h3>行业分布 <span class="hint">按持仓市值合计，行业在「持仓」页填写</span></h3>
+      <div class="sector-bars" id="sectorBars"></div>
     </div>
   </section>
 
@@ -415,6 +439,26 @@
     </div>
   </section>
 
+  <!-- ================= 统计 ================= -->
+  <section class="page" id="page-stats">
+    <div class="page-title">统计分析 <button class="btn mini" id="btnSnapshot" style="margin-left:10px;vertical-align:2px" title="用当前数据覆盖保存今日快照">更新今日快照</button></div>
+    <div class="page-sub">基于交易流水与每日资产快照自动汇总；快照自今日起每天自动存档一次，资产趋势曲线随天数增加而丰满</div>
+
+    <div class="cards" id="statCards"></div>
+
+    <div class="panel" style="margin-bottom:12px">
+      <h3>总资产趋势 <span class="hint">快照：共 <span id="snapCount">0</span> 天</span></h3>
+      <div class="chart-box"><canvas id="trendChart" width="900" height="260"></canvas></div>
+    </div>
+
+    <div class="panel">
+      <h3>月度汇总 <span class="hint">已实现盈亏按卖出日期归属当月</span></h3>
+      <div class="tbl-wrap">
+        <table class="tbl" id="monthlyTable"></table>
+      </div>
+    </div>
+  </section>
+
   <!-- ================= 舆情 ================= -->
   <section class="page" id="page-sentiment">
     <div class="page-title">持仓舆情</div>
@@ -447,6 +491,7 @@
     <div class="field"><label>现价（元，可后补）</label><input type="number" id="mPrice" step="0.001" min="0" placeholder="0.00" autocomplete="off"></div>
     <div class="field"><label>成本价（元，可留空后补）</label><input type="number" id="mCost" step="0.001" min="0" placeholder="留空 = 未录入成本" autocomplete="off"></div>
     <div class="field"><label>证券代码（可选，填了才有实时行情）</label><input id="mCode" placeholder="如 600363 / 01548" autocomplete="off"></div>
+    <div class="field"><label>行业（可选，用于行业分布）</label><input id="mSector" placeholder="如 半导体 / 医药" autocomplete="off"></div>
     <div class="modal-actions">
       <button class="btn" id="mCancel">取消</button>
       <button class="btn primary" id="mConfirm">添加</button>
@@ -468,6 +513,22 @@
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- ===== K线弹窗 ===== -->
+<div class="modal-mask" id="klineModal">
+  <div class="modal" style="width:min(780px,95vw)">
+    <h4 id="klineTitle">K线图</h4>
+    <div id="klinePeriod">
+      <button type="button" class="active" data-klt="101">日K</button>
+      <button type="button" data-klt="102">周K</button>
+    </div>
+    <div class="chart-box"><canvas id="klineCanvas" width="720" height="420"></canvas></div>
+    <div class="form-tip" id="klineHint" style="margin-top:10px"></div>
+    <div class="modal-actions">
+      <button class="btn" id="klineClose">关闭</button>
+    </div>
+  </div>
+</div>
 
 <script>
 "use strict";
@@ -508,6 +569,7 @@ const SEED = {
   trades: [],
   cashFlows: [],
   dividends: [],
+  snapshots: [],
   settings: { autoRefresh:true, refreshSec:60 }
 };
 let state = load();
@@ -530,6 +592,8 @@ function migrate(s){
   s.holdings.forEach(h=>{ if(h.code===undefined) h.code=""; });
   if(!Array.isArray(s.cashFlows)) s.cashFlows = [];
   if(!Array.isArray(s.dividends)) s.dividends = [];
+  if(!Array.isArray(s.snapshots)) s.snapshots = [];
+  s.holdings.forEach(h=>{ if(h.sector===undefined) h.sector=""; });   // 行业字段
   if(!s.settings || typeof s.settings!=="object") s.settings = {};
   s.settings = Object.assign({autoRefresh:true, refreshSec:60}, s.settings);
   if(!(s.baseCash>0)) s.baseCash = s.cash;   // 旧数据以当前余额为锚点
@@ -685,6 +749,22 @@ function deleteDividend(id){
   replayCash();   // 资金重放
   return true;
 }
+/* ================= 历史快照 ================= */
+// 保存/覆盖当天快照（总资产、市值、现金、浮动盈亏）
+function takeSnapshot(){
+  const d = recompute();
+  const t = today();
+  const snap = { date:t, totalAssets:d.totalAssets, totalMV:d.totalMV, cash:d.cash, totalPnl:d.totalPnl!=null?d.totalPnl:null, live:d.liveCount>0 };
+  const idx = state.snapshots.findIndex(s=>s.date===t);
+  if(idx>=0) state.snapshots[idx] = snap; else state.snapshots.push(snap);
+  save();
+  return snap;
+}
+// 打开页面时自动存档（当天未存才存）
+function maybeSnapshot(){
+  if(!state.snapshots.some(s=>s.date===today())) takeSnapshot();
+}
+
 // 查询持仓股分红方案（东财数据中心，A股；接口带 Referer 也放行）
 async function queryDividendPlans(name){
   const h = getHolding(name);
@@ -1029,7 +1109,29 @@ function renderAll(){
   renderTrades();
   renderCashFlows();
   renderDividends();
+  renderSectors();
   renderNameList();
+}
+
+function renderSectors(){
+  const box = $("sectorBars");
+  const agg = {};
+  let total = 0;
+  for(const h of state.holdings){
+    const q = h.code && quoteMap[h.code];
+    const mv = h.shares * (q ? q.price : h.price);
+    const key = (h.sector||"").trim() || "未分类";
+    agg[key] = (agg[key]||0) + mv;
+    total += mv;
+  }
+  const rows = Object.entries(agg).sort((a,b)=>b[1]-a[1]);
+  const maxV = rows.length ? rows[0][1] : 1;
+  box.innerHTML = rows.length ? rows.map(([k,v])=>`
+    <div class="sector-row">
+      <span class="nm">${esc(k)}</span>
+      <span class="bar"><i style="width:${(v/maxV*100).toFixed(1)}%"></i></span>
+      <span class="mv">${fmt(v)} · ${pct(v/total)}</span>
+    </div>`).join("") : '<div class="empty" style="padding:14px 0">暂无持仓</div>';
 }
 
 function renderDividends(){
@@ -1225,6 +1327,7 @@ function renderHoldingsTable(d){
     return `<tr data-name="${h.name}">
       <td><div class="name-cell"><span class="nm">${h.name}</span></div></td>
       <td><input class="edit-input small code-input" data-field="code" value="${esc(h.code)}" placeholder="如 600363" title="证券代码：6 位 A 股 / 5 位港股，或 sh600363、hk01548 格式"></td>
+      <td><input class="edit-input small" data-field="sector" value="${esc(h.sector||"")}" placeholder="如 半导体" title="行业标签（用于行业分布统计）"></td>
       <td><input class="edit-input" data-field="shares" type="number" step="any" min="0" value="${h.shares}"></td>
       ${priceTd}
       <td>${pctCell(h)}</td>
@@ -1234,11 +1337,11 @@ function renderHoldingsTable(d){
       <td>${h.cv!=null?fmt(h.cv):"—"}</td>
       <td class="${plCls}">${h.pl!=null?fmt(h.pl):"—"}</td>
       <td class="${plCls}">${h.pr!=null?pct(h.pr):"—"}</td>
-      <td><div class="op"><button class="btn mini danger" data-act="del">删除</button></div></td>
+      <td><div class="op"><button class="btn mini" data-act="kline">K线</button><button class="btn mini danger" data-act="del">删除</button></div></td>
     </tr>`;
   }).join("");
   $("holdingsTable").innerHTML = `<thead><tr>
-    <th>名称</th><th>代码（填了才有实时行情）</th><th>数量</th><th>现价</th><th>涨跌%</th>
+    <th>名称</th><th>代码（填了才有实时行情）</th><th>行业</th><th>数量</th><th>现价</th><th>涨跌%</th>
     <th>市值</th><th>仓位</th><th>成本价（点击补录）</th><th>成本额</th><th>浮动盈亏</th><th>盈亏率</th><th></th>
   </tr></thead><tbody>${rows}</tbody>`;
 }
@@ -1276,6 +1379,118 @@ function renderNameList(){
   $("nameList").innerHTML = names.map(n=>`<option value="${n}">`).join("");
 }
 
+/* ================= 统计分析 ================= */
+function monthlyStats(){
+  const map = {};
+  const keyOf = s => String(s||"").slice(0,7);
+  const add = (k, field, v)=>{
+    const m = map[k] || (map[k]={key:k, realized:0, in:0, out:0, div:0, sells:0, wins:0});
+    m[field] += v;
+  };
+  for(const t of state.trades){
+    if(t.side!=="sell") continue;
+    const k = keyOf(t.date); if(!k) continue;
+    add(k,"realized", t.realized||0);
+    add(k,"sells",1);
+    if(t.realized>0) add(k,"wins",1);
+  }
+  for(const f of state.cashFlows){
+    const k = keyOf(f.date); if(!k) continue;
+    if(f.type==="in") add(k,"in",f.amount);
+    if(f.type==="out") add(k,"out",f.amount);
+  }
+  for(const d of state.dividends){
+    const k = keyOf(d.date); if(!k) continue;
+    add(k,"div",d.net);
+  }
+  return Object.values(map).sort((a,b)=>b.key.localeCompare(a.key));
+}
+function renderStats(){
+  const ms = monthlyStats();
+  const sells = state.trades.filter(t=>t.side==="sell" && t.realized!=null);
+  const wins = sells.filter(t=>t.realized>0), losses = sells.filter(t=>t.realized<0);
+  const totalRealized = sells.reduce((s,t)=>s+t.realized,0);
+  const totalDiv = state.dividends.reduce((s,d)=>s+d.net,0);
+  const totalIn = state.cashFlows.filter(f=>f.type==="in").reduce((s,f)=>s+f.amount,0);
+  const totalOut = state.cashFlows.filter(f=>f.type==="out").reduce((s,f)=>s+f.amount,0);
+  const winRate = sells.length ? wins.length/sells.length*100 : null;
+  const avgWin = wins.length ? wins.reduce((s,t)=>s+t.realized,0)/wins.length : 0;
+  const avgLoss = losses.length ? Math.abs(losses.reduce((s,t)=>s+t.realized,0)/losses.length) : 0;
+  const plRatio = avgLoss>0 ? avgWin/avgLoss : null;
+  const maxWin = sells.length ? Math.max(...sells.map(t=>t.realized)) : null;
+  const maxLoss = sells.length ? Math.min(...sells.map(t=>t.realized)) : null;
+  const cards = [
+    {label:"已实现盈亏合计", value:fmt(totalRealized), cls:signCls(totalRealized), sub:sells.length+" 笔卖出"},
+    {label:"累计分红", value:fmt(totalDiv), cls:"", sub:state.dividends.length+" 笔"},
+    {label:"净投入", value:fmt(totalIn-totalOut), cls:"", sub:"入金 "+fmt(totalIn)+" / 出金 "+fmt(totalOut)},
+    {label:"交易胜率", value:winRate!=null?winRate.toFixed(1)+"%":"—", cls:"", sub:"盈利卖出 "+wins.length+" / "+sells.length+" 笔"},
+    {label:"盈亏比", value:plRatio!=null?plRatio.toFixed(2):"—", cls:"", sub:"平均盈利 "+fmt(avgWin)+" / 平均亏损 "+fmt(avgLoss)},
+    {label:"最大单笔", value:maxWin!=null?(fmt(maxWin)+" / "+fmt(maxLoss)):"—", cls:signCls(maxWin||0), sub:"最大盈利 / 最大亏损"}
+  ];
+  $("statCards").innerHTML = cards.map(c=>`
+    <div class="card"><div class="label">${c.label}</div><div class="value ${c.cls}">${c.value}</div><div class="sub">${c.sub}</div></div>`).join("");
+  $("snapCount").textContent = state.snapshots.length;
+  drawTrendChart();
+  const rows = ms.map(m=>{
+    const netIn = m.in-m.out;
+    const snap = [...state.snapshots].filter(s=>s.date.startsWith(m.key)).sort((a,b)=>b.date.localeCompare(a.date))[0];
+    return `<tr>
+      <td>${m.key}</td>
+      <td class="${signCls(netIn)}">${netIn!==0?fmt(netIn):"—"}</td>
+      <td class="${signCls(m.realized)}">${m.realized!==0?fmt(m.realized):"—"}</td>
+      <td class="${signCls(m.div)}">${m.div!==0?fmt(m.div):"—"}</td>
+      <td>${m.sells}${m.wins?`（赢 ${m.wins}）`:""}</td>
+      <td>${snap?fmt(snap.totalAssets):"—"}</td>
+    </tr>`;
+  }).join("");
+  $("monthlyTable").innerHTML = `<thead><tr>
+    <th>月份</th><th>净投入</th><th>已实现盈亏</th><th>分红</th><th>卖出笔数</th><th>月末总资产（快照）</th>
+  </tr></thead><tbody>${rows||'<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">暂无流水数据</td></tr>'}</tbody>`;
+}
+function drawTrendChart(){
+  const cv = $("trendChart");
+  const dpr = window.devicePixelRatio||1;
+  const w = cv.parentElement.clientWidth || 900, h = 260;
+  cv.width = w*dpr; cv.height = h*dpr; cv.style.width = w+"px"; cv.style.height = h+"px";
+  const ctx = cv.getContext("2d"); ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,w,h);
+  const snaps = [...state.snapshots].sort((a,b)=>a.date.localeCompare(b.date));
+  if(snaps.length<2){
+    ctx.fillStyle="#8b98ab"; ctx.font="13px sans-serif"; ctx.textAlign="center";
+    ctx.fillText("至少需要 2 天的快照才能绘制趋势线（每天打开页面会自动存档）", w/2, h/2);
+    return;
+  }
+  const padL=64, padR=16, padT=16, padB=28;
+  const vals = snaps.map(s=>s.totalAssets);
+  let vmin = Math.min(...vals), vmax = Math.max(...vals);
+  const span = (vmax-vmin) || vmax*0.01 || 1;
+  vmin -= span*0.08; vmax += span*0.08;
+  const X = i => padL + (w-padL-padR)*(i/(snaps.length-1));
+  const Y = v => padT + (h-padT-padB)*(1-(v-vmin)/(vmax-vmin));
+  ctx.strokeStyle="#262f3d"; ctx.fillStyle="#8b98ab"; ctx.font="11px sans-serif"; ctx.textAlign="right";
+  for(let i=0;i<=5;i++){
+    const v = vmin + (vmax-vmin)*i/5, y = Y(v);
+    ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(w-padR,y); ctx.stroke();
+    ctx.fillText(fmt0(v), padL-6, y+4);
+  }
+  ctx.textAlign="center";
+  const tickEvery = Math.max(1, Math.ceil(snaps.length/8));
+  for(let i=0;i<snaps.length;i++){
+    if(i%tickEvery!==0 && i!==snaps.length-1) continue;
+    ctx.fillText(snaps[i].date.slice(5), X(i), h-padB+16);
+  }
+  const line = (color, getV)=>{
+    ctx.strokeStyle=color; ctx.lineWidth=2; ctx.beginPath();
+    snaps.forEach((s,i)=>{ const x=X(i), y=Y(getV(s)); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+    ctx.stroke();
+  };
+  line("#4d9fff", s=>s.totalAssets);
+  line("#f5b83d", s=>s.totalMV);
+  ctx.font="11px sans-serif"; ctx.textAlign="left";
+  ctx.fillStyle="#4d9fff"; ctx.fillText("—— 总资产", padL+8, padT+6);
+  ctx.fillStyle="#f5b83d"; ctx.fillText("—— 持仓市值", padL+104, padT+6);
+}
+
 /* ================= 事件 ================= */
 function switchPage(page){
   document.querySelectorAll(".page").forEach(p=>p.classList.remove("active"));
@@ -1284,6 +1499,7 @@ function switchPage(page){
     b.classList.toggle("active", b.dataset.page===page);
   });
   if(page==="dashboard") renderAll();
+  if(page==="stats") renderStats();
   if(page==="sentiment"){
     renderSentiment();   // 重建筛选下拉（含最新标的）
     if(SENT.data===null && !SENT.loading) refreshSentiment(false);  // 首次进入自动收集
@@ -1445,6 +1661,8 @@ $("holdingsTable").addEventListener("change", e=>{
   }else if(field==="cost"){
     h.cost = (input.value.trim()==="") ? null : v;
     if(h.cost!=null && h.cost<0){ h.cost=null; toast("成本价不能为负，已清空"); }
+  }else if(field==="sector"){
+    h.sector = input.value.trim();
   }else if(field==="code"){
     const raw = input.value.trim();
     if(raw===""){
@@ -1477,10 +1695,153 @@ $("holdingsTable").addEventListener("click", e=>{
   save(); renderAll();
   toast("已删除持仓");
 });
+/* K线 */
+$("holdingsTable").addEventListener("click", e=>{
+  const b = e.target.closest("[data-act='kline']");
+  if(!b) return;
+  const name = b.closest("tr").dataset.name;
+  const h = getHolding(name);
+  if(!h) return;
+  openKlineModal(h.name, h.code);
+});
+const KLINE_CACHE = {};
+let klineCode="", klineKlt=101, klineLoading=false;
+// 主源：东财历史K线（jsonp）；备源：腾讯前复权K线（_var 全局变量方式）
+function fetchKline(code, klt){
+  const secidMap = {sh:"1.", sz:"0.", hk:"116."};
+  const market = code.slice(0,2);
+  if(!secidMap[market]) return Promise.reject(new Error("暂不支持该市场K线（支持A股与港股代码）"));
+  const secid = secidMap[market]+code.slice(2);
+  const url = "https://push2his.eastmoney.com/api/qt/stock/kline/get?secid="+secid+"&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt="+klt+"&fqt=1&beg=0&end=20500101&lmt=120";
+  return jsonp(url, 10000).then(d=>{
+    const kl = d && d.data && d.data.klines;
+    if(!kl || !kl.length) throw new Error("东财K线无数据");
+    return kl.map(s=>{
+      const f = s.split(",");
+      return { date:f[0], open:+f[1], close:+f[2], high:+f[3], low:+f[4], vol:+f[5], amount:+f[6] };
+    });
+  }).catch(()=>fetchKlineTencent(code, klt));
+}
+function fetchKlineTencent(code, klt){
+  return new Promise((resolve,reject)=>{
+    const vname = "kline_"+Date.now().toString(36)+Math.floor(Math.random()*1e6).toString(36);
+    const s = document.createElement("script");
+    const timer = setTimeout(()=>{ cleanup(); reject(new Error("腾讯K线请求超时")); }, 10000);
+    s.onerror = ()=>{ cleanup(); reject(new Error("腾讯K线加载失败")); };
+    s.onload = ()=>{
+      cleanup();
+      try{
+        const j = window[vname];
+        if(!j || j.code!==0 || !j.data || !j.data[code]) return reject(new Error("腾讯K线无数据"));
+        const kind = klt===101 ? "qfqday" : "qfqweek";
+        const arr = (j.data[code][kind] || j.data[code].day || j.data[code].week || []);
+        if(!arr.length) return reject(new Error("腾讯K线无数据"));
+        resolve(arr.map(f=>({ date:f[0], open:+f[1], close:+f[2], high:+f[3], low:+f[4], vol:+f[5] })));
+      }catch(err){ reject(err); }
+    };
+    s.src = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?_var="+vname+"&param="+code+","+(klt===101?"day":"week")+",,,120,qfq";
+    document.head.appendChild(s);
+    function cleanup(){ clearTimeout(timer); delete window[vname]; s.remove(); }
+  });
+}
+function openKlineModal(name, code){
+  if(!code) return toast("该持仓未填证券代码，无法查看K线");
+  klineCode = code; klineKlt = 101;
+  document.querySelectorAll("#klinePeriod button").forEach(x=>x.classList.toggle("active", +x.dataset.klt===101));
+  $("klineTitle").textContent = name+"（"+code.toUpperCase()+"）· 日K";
+  $("klineModal").classList.add("show");
+  loadKline();
+}
+function loadKline(attempt){
+  attempt = attempt || 1;
+  if(klineLoading) return;
+  klineLoading = true;
+  $("klineHint").textContent = attempt>1 ? "首次请求被数据源拒绝，自动重试中…" : "加载中…";
+  const cacheKey = klineCode+"_"+klineKlt;
+  const p = KLINE_CACHE[cacheKey] ? Promise.resolve(KLINE_CACHE[cacheKey]) : fetchKline(klineCode, klineKlt).then(d=>{ KLINE_CACHE[cacheKey]=d; return d; });
+  p.then(data=>{
+    drawKline(data);
+    $("klineHint").textContent = "前复权 · 最近 "+data.length+" 个"+(klineKlt===101?"交易日":"交易周")+" · 红涨绿跌（A股习惯）";
+    klineLoading = false;
+  }).catch(e=>{
+    if(attempt<3){   // 数据源有频率限制，自动重试
+      klineLoading = false;
+      setTimeout(()=>loadKline(attempt+1), 1500*attempt);
+    }else{
+      $("klineHint").textContent = "K线获取失败："+e.message+"（免费数据源限流，可稍后再试或切换周期）";
+      klineLoading = false;
+    }
+  });
+}
+function drawKline(data){
+  const cv = $("klineCanvas");
+  const dpr = window.devicePixelRatio||1;
+  const w = cv.parentElement.clientWidth || 720, h = 420;
+  cv.width = w*dpr; cv.height = h*dpr; cv.style.width = w+"px"; cv.style.height = h+"px";
+  const ctx = cv.getContext("2d"); ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,w,h);
+  const padL=60, padR=10, padT=14, padB=24, volH=64;
+  const mainH = h - padT - padB - volH - 12;
+  const n = data.length;
+  const step = (w-padL-padR)/n;
+  const bw = Math.max(1.5, step*0.62);
+  const hi = Math.max(...data.map(d=>d.high)), lo = Math.min(...data.map(d=>d.low));
+  const span = (hi-lo) || hi*0.02 || 1;
+  const Y = v => padT + mainH*(1-(v-lo)/span);
+  const X = i => padL + step*(i+0.5);
+  ctx.strokeStyle="#262f3d"; ctx.fillStyle="#8b98ab"; ctx.font="10.5px sans-serif"; ctx.textAlign="right";
+  for(let i=0;i<=4;i++){
+    const v = lo + span*i/4, y = Y(v);
+    ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(w-padR,y); ctx.stroke();
+    ctx.fillText(v.toFixed(2), padL-6, y+4);
+  }
+  const ma = (arr, k)=>{ const out=[]; let sum=0; for(let i=0;i<arr.length;i++){ sum+=arr[i]; if(i>=k) sum-=arr[i-k]; out.push(i>=k-1 ? sum/k : null); } return out; };
+  const closes = data.map(d=>d.close);
+  const ma5 = ma(closes,5), ma10 = ma(closes,10), ma20 = ma(closes,20);
+  const vMax = Math.max(...data.map(d=>d.vol));
+  data.forEach((d,i)=>{
+    const up = d.close>=d.open;
+    const color = up ? "#f0483e" : "#17b26a";
+    const x = X(i);
+    ctx.strokeStyle=color; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(x, Y(d.high)); ctx.lineTo(x, Y(d.low)); ctx.stroke();
+    const yO = Y(d.open), yC = Y(d.close);
+    ctx.fillStyle=color;
+    ctx.fillRect(x-bw/2, Math.min(yO,yC), bw, Math.max(1, Math.abs(yC-yO)));
+    ctx.fillStyle = up ? "rgba(240,72,62,.45)" : "rgba(23,178,106,.45)";
+    const vh = d.vol/vMax*volH;
+    ctx.fillRect(x-bw/2, h-padB-volH+(volH-vh), bw, vh);
+  });
+  const line = (arr, color)=>{
+    ctx.strokeStyle=color; ctx.lineWidth=1.2; ctx.beginPath(); let started=false;
+    arr.forEach((v,i)=>{ if(v==null) return; const x=X(i), y=Y(v); started?ctx.lineTo(x,y):(ctx.moveTo(x,y),started=true); });
+    ctx.stroke();
+  };
+  line(ma5,"#f5b83d"); line(ma10,"#4d9fff"); line(ma20,"#c084fc");
+  ctx.fillStyle="#8b98ab"; ctx.textAlign="center";
+  const tickEvery = Math.max(1, Math.ceil(n/8));
+  for(let i=0;i<n;i++){ if(i%tickEvery!==0 && i!==n-1) continue; ctx.fillText(data[i].date.slice(5), X(i), h-padB+16); }
+  ctx.textAlign="left";
+  const last = data[n-1];
+  ctx.fillStyle="#e8edf4"; ctx.fillText("收 "+last.close.toFixed(2), padL+8, padT+6);
+  ctx.fillStyle="#f5b83d"; ctx.fillText("MA5", padL+88, padT+6);
+  ctx.fillStyle="#4d9fff"; ctx.fillText("MA10", padL+138, padT+6);
+  ctx.fillStyle="#c084fc"; ctx.fillText("MA20", padL+188, padT+6);
+}
+$("klinePeriod").addEventListener("click", e=>{
+  const b = e.target.closest("button");
+  if(!b) return;
+  klineKlt = +b.dataset.klt;
+  document.querySelectorAll("#klinePeriod button").forEach(x=>x.classList.toggle("active", x===b));
+  $("klineTitle").textContent = $("klineTitle").textContent.replace(/·\s*(日K|周K)$/,"· "+(klineKlt===101?"日K":"周K"));
+  loadKline();
+});
+$("klineClose").addEventListener("click", ()=>$("klineModal").classList.remove("show"));
+$("klineModal").addEventListener("click", e=>{ if(e.target===e.currentTarget) $("klineModal").classList.remove("show"); });
 
 /* 添加持仓弹窗 */
 $("btnAddHolding").addEventListener("click", ()=>{
-  $("mName").value=""; $("mShares").value=""; $("mPrice").value=""; $("mCost").value=""; $("mCode").value="";
+  $("mName").value=""; $("mShares").value=""; $("mPrice").value=""; $("mCost").value=""; $("mCode").value=""; $("mSector").value="";
   $("addModal").classList.add("show");
   $("mName").focus();
 });
@@ -1496,7 +1857,7 @@ $("mConfirm").addEventListener("click", ()=>{
   if(shares<0 || price<0) return toast("数量/价格不能为负");
   const code = normalizeCode(codeRaw);
   if(codeRaw && !code) return toast("代码格式无法识别（6 位 A 股 / 5 位港股，或 sh600363、hk01548 写法）");
-  const h = {name, shares, price, cost: costRaw===""?null:num(costRaw), code};
+  const h = {name, shares, price, cost: costRaw===""?null:num(costRaw), code, sector: $("mSector").value.trim()};
   state.holdings.push(h);
   save(); renderAll(); $("addModal").classList.remove("show");
   toast("已添加持仓「"+name+"」"+(code?"，正在获取行情…":""));
@@ -1527,6 +1888,31 @@ $("cashModal").addEventListener("click", e=>{ if(e.target===e.currentTarget) $("
 $("addModal").addEventListener("click", e=>{ if(e.target===e.currentTarget) $("addModal").classList.remove("show"); });
 
 /* 数据管理 */
+$("btnCsv").addEventListener("click", ()=>{
+  const rows = [["类型","日期","证券","方向/类型","价格","数量","手续费","金额变动","已实现盈亏","备注"]];
+  for(const t of state.trades){
+    const delta = t.side==="buy" ? -(t.price*t.shares+t.fee) : (t.price*t.shares-t.fee);
+    rows.push(["交易", t.date, t.name, t.side==="buy"?"买入":"卖出", t.price, t.shares, t.fee, delta, t.realized!=null?t.realized:"", t.note||""]);
+  }
+  for(const f of state.cashFlows){
+    rows.push(["资金", f.date, "", f.type==="in"?"入金":(f.type==="out"?"出金":"调整余额"), "", "", "", f.cashAfter-f.cashBefore, "", f.note||""]);
+  }
+  for(const d of state.dividends){
+    rows.push(["分红", d.date, d.name, "分红", "", "", "", d.net, "", d.note||""]);
+  }
+  rows.slice(1).sort((a,b)=>String(a[1]).localeCompare(String(b[1])) || String(a[0]).localeCompare(String(b[0])));
+  const csv = "﻿" + rows.map(r=>r.map(c=>{
+    c = String(c==null?"":c);
+    return /[",\n]/.test(c) ? '"'+c.replace(/"/g,'""')+'"' : c;
+  }).join(",")).join("\r\n");
+  const blob = new Blob([csv], {type:"text/csv;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "tradebook-records-"+today()+".csv";
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast("已导出 CSV（"+rows.length+" 行，Excel 可直接打开）");
+});
 $("btnExport").addEventListener("click", ()=>{
   const blob = new Blob([JSON.stringify(state,null,2)], {type:"application/json"});
   const a = document.createElement("a");
@@ -1597,6 +1983,13 @@ $("btnRefreshSentiment").addEventListener("click", ()=>refreshSentiment(true));
 $("sentFilter").addEventListener("change", renderSentiment);
 $("sentOnlyRelated").addEventListener("change", renderSentiment);
 
+/* 统计页 */
+$("btnSnapshot").addEventListener("click", ()=>{
+  takeSnapshot();
+  renderStats();
+  toast("今日快照已更新（"+today()+"）");
+});
+
 /* 键盘快捷键 */
 document.addEventListener("keydown", e=>{
   if(e.target.matches("input,select,textarea")) return;
@@ -1604,6 +1997,7 @@ document.addEventListener("keydown", e=>{
   if(e.key==="2") switchPage("holdings");
   if(e.key==="3") switchPage("trades");
   if(e.key==="4") switchPage("sentiment");
+  if(e.key==="5") switchPage("stats");
 });
 
 /* ================= 启动 ================= */
@@ -1611,7 +2005,12 @@ $("tDate").value = today();
 $("cfDate").value = today();
 $("dDate").value = today();
 renderAll();
+maybeSnapshot();        // 每日资产快照（当天首次打开自动存档）
 refreshQuotes(false);   // 启动即拉一次实时行情（有代码的持仓）
+// PWA：仅线上 HTTPS 注册（本地双击打开不受影响）
+if("serviceWorker" in navigator && location.protocol.startsWith("https")){
+  navigator.serviceWorker.register("sw.js").catch(()=>{});
+}
 </script>
 </body>
 </html>

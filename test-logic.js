@@ -20,7 +20,8 @@ const SEED = {
   ],
   trades: [],
   cashFlows: [],
-  dividends: []
+  dividends: [],
+  snapshots: []
 };
 
 // —— 与 index.html 保持一致的工具函数副本 ——
@@ -117,6 +118,43 @@ function deleteDividend(id){
   state.dividends.splice(i,1);
   replayCash();
   return true;
+}
+// —— 快照与月度统计（与 index.html 一致）——
+function takeSnapshot(){
+  const d = recompute();
+  const t = "2026-08-21";
+  const snap = { date:t, totalAssets:d.totalAssets, totalMV:d.totalMV, cash:d.cash, totalPnl:d.totalPnl!=null?d.totalPnl:null, live:d.liveCount>0 };
+  const idx = state.snapshots.findIndex(s=>s.date===t);
+  if(idx>=0) state.snapshots[idx] = snap; else state.snapshots.push(snap);
+  return snap;
+}
+function maybeSnapshot(){
+  if(!state.snapshots.some(s=>s.date==="2026-08-21")) takeSnapshot();
+}
+function monthlyStats(){
+  const map = {};
+  const keyOf = s => String(s||"").slice(0,7);
+  const add = (k, field, v)=>{
+    const m = map[k] || (map[k]={key:k, realized:0, in:0, out:0, div:0, sells:0, wins:0});
+    m[field] += v;
+  };
+  for(const t of state.trades){
+    if(t.side!=="sell") continue;
+    const k = keyOf(t.date); if(!k) continue;
+    add(k,"realized", t.realized||0);
+    add(k,"sells",1);
+    if(t.realized>0) add(k,"wins",1);
+  }
+  for(const f of state.cashFlows){
+    const k = keyOf(f.date); if(!k) continue;
+    if(f.type==="in") add(k,"in",f.amount);
+    if(f.type==="out") add(k,"out",f.amount);
+  }
+  for(const d of state.dividends){
+    const k = keyOf(d.date); if(!k) continue;
+    add(k,"div",d.net);
+  }
+  return Object.values(map).sort((a,b)=>b.key.localeCompare(a.key));
 }
 // —— 出入金（与 index.html 保持一致）——
 let cfIdc = 0;
@@ -393,6 +431,43 @@ check("删分红后现金", state.cash, m0+50000);
 deleteCashFlow(state.cashFlows[0].id);
 check("删入金后现金回到锚点", state.cash, m0);
 check("持仓数量回滚", getHolding("迈威生物").shares, 500);
+
+console.log("== 测试16：历史快照 ==");
+state = JSON.parse(JSON.stringify(SEED));
+check("初始无快照", state.snapshots.length, 0);
+maybeSnapshot();
+check("自动存档1条", state.snapshots.length, 1);
+check("快照总资产正确", state.snapshots[0].totalAssets, 468461.89);
+const snapV1 = state.snapshots[0];
+state.cash = 99999;  // 模拟数据变化
+takeSnapshot();
+check("同日覆盖不新增", state.snapshots.length, 1);
+check("快照已更新", state.snapshots[0].cash, 99999);
+state.cash = 155291.89;
+state.snapshots[0] = snapV1;
+
+console.log("== 测试17：月度统计 ==");
+state = JSON.parse(JSON.stringify(SEED));
+// 构造跨月数据
+addTrade("buy","麦格数据","2026-06-10",100, 100, 5, "");
+addTrade("sell","麦格数据","2026-06-20",120, 50, 5, "");   // 6月卖出盈利
+addTrade("sell","迈威生物","2026-07-15",20, 100, 5, "");   // 7月卖出亏损（成本null→realized null，不计入）
+addCashFlow("in","2026-06-01",20000,"");
+addCashFlow("out","2026-06-05",5000,"");
+addDividend("联创光电","2026-07-10",800,"");
+const ms = monthlyStats();
+const jun = ms.find(m=>m.key==="2026-06");
+const jul = ms.find(m=>m.key==="2026-07");
+// 麦格初始 700 股成本 null：买入 100 股后成本=(100×100+5)/800=12.50625（按全部数量分摊）
+// 卖出 50 股：realized=(120-12.50625)×50-5=5369.6875
+check("6月已实现盈亏", jun.realized, 5369.6875);
+check("6月卖出笔数", jun.sells, 1);
+check("6月盈利笔数", jun.wins, 1);
+check("6月净投入", jun.in-jun.out, 15000);
+check("7月分红", jul.div, 800);
+check("7月卖出笔数(含成本未知)", jul.sells, 1);
+check("7月盈利笔数(成本未知不计盈)", jul.wins, 0);
+check("月度排序倒序", ms[0].key>=ms[1].key, true);
 
 console.log("\n==================");
 console.log("通过 "+pass+" 项，失败 "+fail+" 项");
