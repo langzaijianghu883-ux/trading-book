@@ -396,6 +396,17 @@
     </div>
 
     <div class="panel" style="margin-bottom:12px">
+      <h3>批量录入 <span class="hint">把交易记录截图发给 NewMax 对话识别后，把生成的标准 JSON 粘贴到这里，或直接粘贴券商复制的成交明细文本</span></h3>
+      <textarea id="batchText" rows="4" style="width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:10px;font-size:13px;font-family:inherit;outline:none;resize:vertical" placeholder="示例：&#10;[{&quot;date&quot;:&quot;2026-08-21&quot;,&quot;name&quot;:&quot;迈威生物&quot;,&quot;side&quot;:&quot;buy&quot;,&quot;price&quot;:32.59,&quot;shares&quot;:300,&quot;fee&quot;:0,&quot;note&quot;:&quot;截图录入&quot;}]&#10;或文本行：2026-08-21 迈威生物 买入 32.59 300股 手续费0"></textarea>
+      <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;align-items:center">
+        <button class="btn" id="btnParseBatch">解析预览</button>
+        <button class="btn primary" id="btnApplyBatch" style="display:none">确认录入</button>
+        <span style="font-size:12px;color:var(--muted)" id="batchHint"></span>
+      </div>
+      <div class="tbl-wrap" id="batchPreview" style="margin-top:10px;display:none"></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:12px">
       <h3>录入新交易</h3>
       <div class="form" id="tradeForm">
         <div class="field">
@@ -1627,6 +1638,106 @@ function drawTrendChart(){
   ctx.fillStyle="#4d9fff"; ctx.fillText("—— 总资产", padL+8, padT+6);
   ctx.fillStyle="#f5b83d"; ctx.fillText("—— 持仓市值", padL+104, padT+6);
 }
+
+/* ================= 批量录入（截图识别入口） ================= */
+// 解析批量文本 → [{date,name,side,price,shares,fee,note}]；支持标准 JSON 或宽松文本行
+function parseTradeText(text){
+  const items = [], errors = [];
+  const lines = String(text||"").split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  try{
+    const j = JSON.parse(text);
+    if(Array.isArray(j) && j.length){
+      for(const it of j){
+        const t = normalizeBatchItem(it);
+        if(t) items.push(t); else errors.push("JSON 条目字段不完整："+JSON.stringify(it));
+      }
+      return {items, errors, json:true};
+    }
+  }catch(e){ /* 非 JSON，走行解析 */ }
+  for(const line of lines){
+    const t = parseBatchLine(line);
+    if(t) items.push(t); else errors.push("无法识别："+line.slice(0,40));
+  }
+  return {items, errors, json:false};
+}
+function normalizeBatchItem(it){
+  if(!it || typeof it!=="object") return null;
+  const side = String(it.side||it.direction||"").toLowerCase();
+  const s = side.includes("sell")||side.includes("卖") ? "sell" : (side.includes("buy")||side.includes("买") ? "buy" : "");
+  const price = num(it.price), shares = num(it.shares), fee = num(it.fee||0);
+  const name = String(it.name||it.symbol||it.stock||"").trim();
+  const date = String(it.date||"").trim();
+  if(!name || !s || !(price>0) || !(shares>0)) return null;
+  return {date: date || today(), name, side:s, price, shares, fee, note: String(it.note||"批量录入").trim()};
+}
+function parseBatchLine(line){
+  let rest = line;
+  const mDate = rest.match(/(20\d{2})[-/年](\d{1,2})[-/月](\d{1,2})日?/);
+  let date = today();
+  if(mDate){
+    date = mDate[1]+"-"+String(+mDate[2]).padStart(2,"0")+"-"+String(+mDate[3]).padStart(2,"0");
+    rest = rest.replace(mDate[0]," ");
+  }
+  const mSide = rest.match(/(买入|买进|买|卖出|卖)/);
+  if(!mSide) return null;
+  const side = mSide[1].includes("卖") ? "sell" : "buy";
+  rest = rest.replace(mSide[0]," ");
+  const mShares = rest.match(/(\d+(?:\.\d+)?)\s*手|(\d+(?:\.\d+)?)\s*[股份]/);
+  let shares = 0;
+  if(mShares){ shares = mShares[1] ? (+mShares[1])*100 : +mShares[2]; rest = rest.replace(mShares[0]," "); }
+  const mAt = rest.match(/[@＠]\s*(\d+(?:\.\d+)?)/);   // @价格 优先（如 300股 @32.59）
+  let price = 0;
+  if(mAt){ price = +mAt[1]; rest = rest.replace(mAt[0]," "); }
+  else{
+    const mPrice = rest.match(/价\s*[:：]?\s*(\d+(?:\.\d+)?)|(\d+\.\d{1,3})/);
+    if(mPrice){ price = +mPrice[1] || +mPrice[2]; rest = rest.replace(mPrice[0]," "); }
+  }
+  const mFee = rest.match(/费\s*[:：]?\s*(\d+(?:\.\d+)?)/);
+  let fee = 0;
+  if(mFee){ fee = +mFee[1]; rest = rest.replace(mFee[0]," "); }
+  const mName = rest.match(/[^\s\d|,，。、:：;；@＠%()（）]+/);
+  const name = mName ? mName[0].trim() : "";
+  if(!name || !(price>0) || !(shares>0)) return null;
+  return {date, name, side, price, shares, fee, note:"批量录入"};
+}
+let batchItems = [];
+$("btnParseBatch").addEventListener("click", ()=>{
+  const text = $("batchText").value;
+  if(!text.trim()) return toast("请先粘贴识别结果或成交明细文本");
+  const r = parseTradeText(text);
+  batchItems = r.items;
+  const box = $("batchPreview");
+  box.style.display = "block";
+  const errHtml = r.errors.length ? `<div class="sent-err" style="margin-bottom:8px">⚠️ ${r.errors.map(esc).join("；")}</div>` : "";
+  if(!r.items.length){
+    box.innerHTML = errHtml + '<div class="empty" style="padding:16px 0">未解析出有效交易（请检查格式，或直接把文本/识别结果发给 NewMax 生成标准 JSON）</div>';
+    $("btnApplyBatch").style.display = "none";
+    $("batchHint").textContent = "";
+    return;
+  }
+  box.innerHTML = errHtml + `<table class="tbl" style="min-width:600px"><thead><tr>
+    <th>日期</th><th>证券</th><th>方向</th><th>价格</th><th>数量</th><th>手续费</th>
+  </tr></thead><tbody>` + r.items.map(it=>`<tr>
+    <td>${it.date}</td><td>${esc(it.name)}</td>
+    <td class="${it.side==="buy"?"up":"down"}">${it.side==="buy"?"买入":"卖出"}</td>
+    <td>${it.price}</td><td>${fmt0(it.shares)}</td><td>${fmt(it.fee)}</td>
+  </tr>`).join("") + `</tbody></table>`;
+  $("btnApplyBatch").style.display = "inline-block";
+  $("batchHint").textContent = "解析出 "+r.items.length+" 笔"+(r.errors.length?"（"+r.errors.length+" 行失败，见上方提示）":"")+"，请核对后确认录入";
+});
+$("btnApplyBatch").addEventListener("click", ()=>{
+  if(!batchItems.length) return;
+  let ok = 0; const fails = [];
+  for(const it of batchItems){
+    const t = addTrade(it.side, it.name, it.date, it.price, it.shares, it.fee, it.note);
+    if(t) ok++; else fails.push(it.name+" "+(it.side==="buy"?"买入":"卖出")+" "+fmt0(it.shares)+"（超出持仓数量或可用余额）");
+  }
+  save(); renderAll();
+  $("batchText").value=""; $("batchPreview").style.display="none";
+  $("btnApplyBatch").style.display="none"; $("batchHint").textContent=""; batchItems=[];
+  toast("批量录入完成："+ok+" 笔成功"+(fails.length?"，"+(fails.length+" 笔失败："+fails.join("；")):""));
+  if(ok) switchPage("dashboard");
+});
 
 /* ================= 事件 ================= */
 function switchPage(page){

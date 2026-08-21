@@ -500,6 +500,75 @@ check("-U清洗: 迈威生物-U→迈威生物", cleanRealName("迈威生物-U")
 check("空真实名不改", shouldRename("消费ETF",""), false);
 check("空用户名不改", shouldRename("","联创光电"), false);
 
+console.log("== 测试20：批量录入解析 ==");
+// 与 index.html parseTradeText/normalizeBatchItem 一致（today 固定 2026-08-21）
+const T0="2026-08-21";
+const num2=(v,d=0)=>{const n=parseFloat(v);return isNaN(n)?d:n;};
+function normalizeBatchItem(it){
+  if(!it||typeof it!=="object") return null;
+  const side=String(it.side||it.direction||"").toLowerCase();
+  const s=side.includes("sell")||side.includes("卖")?"sell":(side.includes("buy")||side.includes("买")?"buy":"");
+  const price=num2(it.price), shares=num2(it.shares), fee=num2(it.fee||0);
+  const name=String(it.name||it.symbol||it.stock||"").trim();
+  const date=String(it.date||"").trim();
+  if(!name||!s||!(price>0)||!(shares>0)) return null;
+  return {date:date||T0, name, side:s, price, shares, fee, note:String(it.note||"批量录入").trim()};
+}
+// JSON 解析
+const r1=normalizeBatchItem({date:"2026-08-20",name:"迈威生物",side:"buy",price:32.59,shares:300,fee:5});
+check("JSON条目正常", r1!==null, true);
+check("JSON方向buy", r1.side, "buy");
+check("JSON缺字段→null", normalizeBatchItem({name:"迈威生物",side:"buy"}), null);
+check("JSON英文字段side=sell", normalizeBatchItem({name:"联创光电",side:"sell",price:18,shares:100}).side, "sell");
+check("JSON缺日期补今天", normalizeBatchItem({name:"联创光电",side:"buy",price:18,shares:100}).date, T0);
+// 文本行解析（简化版：直接验证关键字段提取逻辑）
+function parseBatchLine(line){
+  let rest=line;
+  const mDate=rest.match(/(20\d{2})[-/年](\d{1,2})[-/月](\d{1,2})日?/);
+  let date=T0;
+  if(mDate){ date=mDate[1]+"-"+String(+mDate[2]).padStart(2,"0")+"-"+String(+mDate[3]).padStart(2,"0"); rest=rest.replace(mDate[0]," "); }
+  const mSide=rest.match(/(买入|买进|买|卖出|卖)/);
+  if(!mSide) return null;
+  const side=mSide[1].includes("卖")?"sell":"buy";
+  rest=rest.replace(mSide[0]," ");
+  const mShares=rest.match(/(\d+(?:\.\d+)?)\s*手|(\d+(?:\.\d+)?)\s*[股份]/);
+  let shares=0;
+  if(mShares){ shares=mShares[1]?(+mShares[1])*100:+mShares[2]; rest=rest.replace(mShares[0]," "); }
+  const mAt=rest.match(/[@＠]\s*(\d+(?:\.\d+)?)/);
+  let price=0;
+  if(mAt){ price=+mAt[1]; rest=rest.replace(mAt[0]," "); }
+  else{
+    const mPrice=rest.match(/价\s*[:：]?\s*(\d+(?:\.\d+)?)|(\d+\.\d{1,3})/);
+    if(mPrice){ price=+mPrice[1]||+mPrice[2]; rest=rest.replace(mPrice[0]," "); }
+  }
+  const mFee=rest.match(/费\s*[:：]?\s*(\d+(?:\.\d+)?)/);
+  let fee=0;
+  if(mFee){ fee=+mFee[1]; rest=rest.replace(mFee[0]," "); }
+  const mName=rest.match(/[^\s\d|,，。、:：;；@＠%()（）]+/);
+  const name=mName?mName[0].trim():"";
+  if(!name||!(price>0)||!(shares>0)) return null;
+  return {date,name,side,price,shares,fee};
+}
+let t=parseBatchLine("2026-08-20 迈威生物 买入 32.59 300股 手续费5");
+check("文本行解析成功", t!==null, true);
+check("文本日期", t.date, "2026-08-20");
+check("文本名称", t.name, "迈威生物");
+check("文本方向", t.side, "buy");
+check("文本价格", t.price, 32.59);
+check("文本数量", t.shares, 300);
+check("文本手续费", t.fee, 5);
+t=parseBatchLine("2026/08/20 联创光电 卖出 18.36 2手 费10");
+check("文本-手换算(2手=200股)", t.shares, 200);
+check("文本-卖出方向", t.side, "sell");
+check("文本-费10", t.fee, 10);
+t=parseBatchLine("惠城环保 买 72.8 200股");   // 无日期
+check("文本-无日期补今天", t.date, T0);
+check("文本-无手续费默认0", t.fee, 0);
+t=parseBatchLine("乱七八糟的一行");
+check("无法识别行→null", t, null);
+t=parseBatchLine("成都先导 买入 38.7 600股 @39 费3");  // @ 优先级
+check("文本-@价格优先", t.price, 39);
+
 console.log("\n==================");
 console.log("通过 "+pass+" 项，失败 "+fail+" 项");
 process.exit(fail>0?1:0);
