@@ -469,6 +469,15 @@ check("7月卖出笔数(含成本未知)", jul.sells, 1);
 check("7月盈利笔数(成本未知不计盈)", jul.wins, 0);
 check("月度排序倒序", ms[0].key>=ms[1].key, true);
 
+console.log("== 测试18：行业名提取 ==");
+// 与 index.html extractSectorName 一致
+const extractSectorName = raw => { const parts = String(raw||"").split("-"); return parts[parts.length-1].trim() || ""; };
+check("制造业-医药制造业→医药制造业", extractSectorName("制造业-医药制造业"), "医药制造业");
+check("科学研究和技术服务业-研究和试验发展→研究和试验发展", extractSectorName("科学研究和技术服务业-研究和试验发展"), "研究和试验发展");
+check("单段行业原样", extractSectorName("金融业"), "金融业");
+check("空值→空", extractSectorName(""), "");
+check("null→空", extractSectorName(null), "");
+
 console.log("\n==================");
 console.log("通过 "+pass+" 项，失败 "+fail+" 项");
 process.exit(fail>0?1:0);

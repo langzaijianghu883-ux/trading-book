@@ -313,7 +313,10 @@
         <table class="tbl" id="holdingsTable"></table>
       </div>
     </div>
-    <button class="btn primary" id="btnAddHolding">＋ 添加持仓（不发流水）</button>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn primary" id="btnAddHolding">＋ 添加持仓（不发流水）</button>
+      <button class="btn" id="btnAutoSector" title="按公开数据（东财数据中心·证监会行业分类）自动填充行业为空的持仓">按公开信息自动填行业</button>
+    </div>
   </section>
 
   <!-- ================= 交易流水 ================= -->
@@ -560,7 +563,7 @@ const SEED = {
     {name:"消费ETF",  shares:10000, price:0.831, cost:null, code:"sz159928"},
     {name:"惠城环保", shares:200,   price:72.80, cost:null, code:"sz300779"},
     {name:"ST京蓝",   shares:1000,  price:6.11,  cost:null, code:"sz000711"},
-    {name:"新恒汇",   shares:1400,  price:44.68, cost:null, code:"sz301328"},
+    {name:"新恒汇",   shares:1400,  price:44.68, cost:null, code:"sz301678"},
     {name:"麦格数据", shares:700,   price:128.28,cost:null, code:""},
     {name:"金斯瑞",   shares:1000,  price:33.26, cost:null, code:"hk01548"},
     {name:"赛维电子", shares:1200,  price:31.55, cost:null, code:""},
@@ -763,6 +766,56 @@ function takeSnapshot(){
 // 打开页面时自动存档（当天未存才存）
 function maybeSnapshot(){
   if(!state.snapshots.some(s=>s.date===today())) takeSnapshot();
+}
+
+/* ================= 行业自动填充 ================= */
+// 从证监会行业分类中取可读名称："制造业-医药制造业" → "医药制造业"
+function extractSectorName(raw){
+  const parts = String(raw||"").split("-");
+  return parts[parts.length-1].trim() || "";
+}
+// 按代码查询行业（东财数据中心，稳定域名）；返回 {name, sector}，无数据时 sector 为空
+async function fetchSectorInfo(code){
+  const map = {sh:"SH", sz:"SZ", hk:"HK"};
+  const market = code.slice(0,2);
+  if(!map[market]) return {name:"", sector:""};
+  const secu = code.slice(2)+"."+map[market];
+  const url = "https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_F10_BASIC_ORGINFO&columns=INDUSTRYCSRC1,SECURITY_NAME_ABBR&filter=(SECUCODE%3D%22"+secu+"%22)&pageNumber=1&pageSize=1&sortColumns=SECUCODE&sortTypes=1";
+  const r = await fetchWithTimeout(url, 10000);
+  if(!r.ok) throw new Error(friendlyHttp(r.status));
+  const j = await r.json();
+  const it = j.result && j.result.data && j.result.data[0];
+  if(!it) return {name:"", sector:""};
+  return { name: it.SECURITY_NAME_ABBR||"", sector: extractSectorName(it.INDUSTRYCSRC1) };
+}
+// 一键自动填充：只填充行业为空的持仓；已填的跳过；代码与名称不符时给出提示
+async function autoFillSectors(){
+  const targets = state.holdings.filter(h=>h.code && !(h.sector||"").trim());
+  if(targets.length===0) return toast("没有需要填充的持仓（行业均为空才自动填，已填的可手动修改）");
+  const btn = $("btnAutoSector");
+  if(btn){ btn.disabled = true; btn.textContent = "获取中…"; }
+  let filled=0, noData=0, failed=0;
+  const warns = [];
+  for(const h of targets){
+    try{
+      const info = await fetchSectorInfo(h.code);
+      if(info.sector){
+        h.sector = info.sector;
+        filled++;
+        if(info.name && h.name !== info.name && !h.name.includes(info.name) && !info.name.includes(h.name)){
+          warns.push(h.name+"（代码"+h.code.toUpperCase()+" 对应「"+info.name+"」，请核对代码）");
+        }
+      }else{
+        noData++;
+      }
+    }catch(e){ failed++; }
+    await sleep(150);
+  }
+  if(btn){ btn.disabled = false; btn.textContent = "按公开信息自动填行业"; }
+  save(); renderAll();
+  let msg = "行业自动填充：新填 "+filled+" 个"+(noData?"，无数据 "+noData:"")+(failed?"，失败 "+failed:"");
+  toast(msg);
+  if(warns.length) setTimeout(()=>alert(warns.join("\n")), 100);
 }
 
 // 查询持仓股分红方案（东财数据中心，A股；接口带 Referer 也放行）
@@ -1838,6 +1891,9 @@ $("klinePeriod").addEventListener("click", e=>{
 });
 $("klineClose").addEventListener("click", ()=>$("klineModal").classList.remove("show"));
 $("klineModal").addEventListener("click", e=>{ if(e.target===e.currentTarget) $("klineModal").classList.remove("show"); });
+
+/* 行业自动填充 */
+$("btnAutoSector").addEventListener("click", ()=>autoFillSectors());
 
 /* 添加持仓弹窗 */
 $("btnAddHolding").addEventListener("click", ()=>{
