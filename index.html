@@ -292,7 +292,38 @@
   <!-- ================= 交易流水 ================= -->
   <section class="page" id="page-trades">
     <div class="page-title">交易流水</div>
-    <div class="page-sub">录入每笔买入 / 卖出，系统自动更新持仓数量、加权成本、可用余额，并重算所有指标。</div>
+    <div class="page-sub">录入每笔买入 / 卖出 / 出入金，系统自动更新持仓数量、加权成本、可用余额，并重算所有指标。</div>
+
+    <div class="panel" style="margin-bottom:12px">
+      <h3>出入金记录 <span class="hint">入金/出金直接增减可用余额，与交易流水独立记录（银证转账等）</span></h3>
+      <div class="form" id="cashFlowForm">
+        <div class="field">
+          <label>方向</label>
+          <div class="side-toggle">
+            <button type="button" class="buy active" data-side="in">入金</button>
+            <button type="button" class="sell" data-side="out">出金</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>日期</label>
+          <input type="date" id="cfDate">
+        </div>
+        <div class="field">
+          <label>金额（元）</label>
+          <input type="number" id="cfAmount" step="0.01" min="0" placeholder="0.00" autocomplete="off">
+        </div>
+        <div class="field" style="grid-column:span 2">
+          <label>备注（可选）</label>
+          <input id="cfNote" placeholder="如：银证转账 / 提现" autocomplete="off">
+        </div>
+        <div class="form-tip" id="cfTip">出金金额不能超过当前可用余额；出入金不影响持仓、成本与已实现盈亏。</div>
+        <div class="field" style="grid-column:1/-1;display:flex;gap:10px">
+          <button class="btn primary" id="btnAddCashFlow" style="min-width:120px">记录出入金</button>
+          <span style="align-self:center;font-size:12px;color:var(--muted)" id="cfBalance">当前可用余额：—</span>
+        </div>
+      </div>
+      <div id="cashFlowList" style="margin-top:14px"></div>
+    </div>
 
     <div class="panel" style="margin-bottom:12px">
       <h3>录入新交易</h3>
@@ -419,6 +450,7 @@ const LS_KEY = "tradebook.v1";
 const SEED = {
   version: 1,
   cash: 155291.89,
+  baseCash: 155291.89,   // 资金锚点：所有交易/出入金/调余额记录的起点
   holdings: [
     {name:"迈威生物", shares:500,   price:32.50, cost:null, code:"sh688062"},
     {name:"联创光电", shares:400,   price:18.36, cost:null, code:"sh600363"},
@@ -433,6 +465,7 @@ const SEED = {
     {name:"恒生科技", shares:22800, price:0.61,  cost:null, code:""}
   ],
   trades: [],
+  cashFlows: [],
   settings: { autoRefresh:true, refreshSec:60 }
 };
 let state = load();
@@ -450,11 +483,24 @@ function load(){
   }catch(e){}
   return JSON.parse(JSON.stringify(SEED));
 }
-// 旧版本数据迁移：补 code / settings 字段
+// 旧版本数据迁移：补 code / settings / cashFlows / baseCash 字段
 function migrate(s){
   s.holdings.forEach(h=>{ if(h.code===undefined) h.code=""; });
+  if(!Array.isArray(s.cashFlows)) s.cashFlows = [];
   if(!s.settings || typeof s.settings!=="object") s.settings = {};
   s.settings = Object.assign({autoRefresh:true, refreshSec:60}, s.settings);
+  if(!(s.baseCash>0)) s.baseCash = s.cash;   // 旧数据以当前余额为锚点
+}
+// 资金重放：从锚点按时间顺序重放全部交易与出入金/调余额记录，
+// 使删除任意记录（任意顺序）后余额都正确
+function replayCash(){
+  const evts = [];
+  for(const t of state.trades) evts.push({order:t.createdAt, delta:t.cashAfter-t.cashBefore});
+  for(const f of state.cashFlows) evts.push({order:f.createdAt, delta:f.cashAfter-f.cashBefore});
+  evts.sort((a,b)=>a.order-b.order);
+  let cash = state.baseCash;
+  for(const e of evts) cash += e.delta;
+  state.cash = cash;
 }
 function save(){ localStorage.setItem(LS_KEY, JSON.stringify(state)); }
 
@@ -551,8 +597,31 @@ function deleteTrade(id){
     h.cost = t.costBefore;
     if(h.shares<=0 && h.cost==null){} // 保留条目
   }
-  state.cash = t.cashBefore;
   state.trades.splice(i,1);
+  replayCash();   // 资金重放：任意删除顺序余额都正确
+  return true;
+}
+
+/* ================= 出入金记录 ================= */
+function addCashFlow(type, date, amount, note){
+  const cashBefore = state.cash;
+  const delta = type==="in" ? amount : -amount;
+  const cashAfter = cashBefore + delta;
+  if(type==="out" && cashAfter < -1e-9) return null;   // 出金不能超过可用余额
+  const flow = {
+    id: uid(), date, type, amount,
+    note: (note||"").trim(),
+    cashBefore, cashAfter, createdAt: Date.now()
+  };
+  state.cash = cashAfter;
+  state.cashFlows.push(flow);
+  return flow;
+}
+function deleteCashFlow(id){
+  const i = state.cashFlows.findIndex(f=>f.id===id);
+  if(i<0) return false;
+  state.cashFlows.splice(i,1);
+  replayCash();   // 资金重放
   return true;
 }
 
@@ -575,15 +644,15 @@ function normalizeCode(input){
   }
   return "";
 }
-// 通用 JSONP
-function jsonp(url, timeout){
+// 通用 JSONP（cbParam：接口要求的回调参数名，东财 push2 用 cb，其他接口按需指定）
+function jsonp(url, timeout, cbParam){
   return new Promise((resolve,reject)=>{
     const cb = "cb_"+Date.now().toString(36)+Math.floor(Math.random()*1e6).toString(36);
     const s = document.createElement("script");
     const timer = setTimeout(()=>{ cleanup(); reject(new Error("请求超时")); }, timeout||8000);
     window[cb] = data=>{ cleanup(); resolve(data); };
     s.onerror = ()=>{ cleanup(); reject(new Error("请求失败")); };
-    s.src = url + (url.includes("?")?"&":"?") + "cb=" + cb;
+    s.src = url + (url.includes("?")?"&":"?") + (cbParam||"cb") + "=" + cb;
     document.head.appendChild(s);
     function cleanup(){ clearTimeout(timer); delete window[cb]; s.remove(); }
   });
@@ -724,7 +793,7 @@ function startQuoteTimer(){
 }
 
 /* ================= 持仓舆情 ================= */
-const SENT = { data:null, loading:false, perStock:{}, lastRun:null };
+const SENT = { data:null, loading:false, perStock:{}, lastRun:null, errors:[], stat:null };
 const BEAR_WORDS = ["冻结","轮候冻结","减持","质押","立案","处罚","警示","问询","诉讼","违约","退市","亏损","预亏","下滑","终止","被查","监管","跌停","爆雷","纠纷","违规","风险","强制","平仓","担保","诉讼","仲裁","调查","立案","逮捕","受贿","套现","抛售","利空"];
 const BULL_WORDS = ["中标","获批","核准","签约","合作","订单","预增","增持","回购","分红","重组","突破","投产","扩产","涨停","扭亏","新高","注入","豁免","中标","业绩预增","大单","战略","签署","核准","获批","增资","合资","收购","并购","完成","交付"];
 // 情绪粗判：利空词优先，其次利好词，否则中性
@@ -750,16 +819,19 @@ async function fetchAnnouncements(h, code6){
     source:"交易所公告"
   }));
 }
-// ② 东方财富资讯流（jsonp，按持仓名称过滤；326=当日要闻、333=焦点补充）
-function fetchNewsFlow(){
+// ② 东方财富资讯流（fetch + CORS，按持仓名称过滤；326=当日要闻、333=焦点补充）
+// 注：该接口回调参数名为 callback（非 cb），且本身支持 CORS，直接 fetch 最稳妥
+async function fetchNewsFlow(){
   const cols=[326,333], pages=[1,2];
-  const tasks=[];
+  const out=[];
   for(const c of cols) for(const p of pages){
-    tasks.push(jsonp(
-      "https://np-listapi.eastmoney.com/comm/web/getNewsByColumns?client=web&biz=web_news_col&column="+c+"&page_index="+p+"&page_size=20&f_node=0&s_node=0&req_trace="+Math.random().toString(36).slice(2)+"&fields=code,showTime,title,mediaName,summary,url", 10000)
-      .then(d=>((d&&d.data&&d.data.list)||[])).catch(()=>[]));
+    try{
+      const r = await fetchWithTimeout("https://np-listapi.eastmoney.com/comm/web/getNewsByColumns?client=web&biz=web_news_col&column="+c+"&page_index="+p+"&page_size=20&f_node=0&s_node=0&req_trace="+Math.random().toString(36).slice(2)+"&fields=code,showTime,title,mediaName,summary,url", 10000);
+      const j = await r.json();
+      if(j && j.data && Array.isArray(j.data.list)) out.push(...j.data.list);
+    }catch(e){ /* 单栏目失败不影响其他 */ }
   }
-  return Promise.all(tasks).then(ls=>ls.flat());
+  return out;
 }
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 // 收集舆情主流程
@@ -769,21 +841,25 @@ async function refreshSentiment(manual){
   $("sentLoading").style.display = "flex";
   const items = [];
   const errs = [];
+  SENT.errors = [];
   // 阶段一：公告（有 A 股代码的持仓）
   const annTargets = state.holdings.filter(h=>h.code && h.code.startsWith("sh") || h.code && h.code.startsWith("sz"));
+  let annCount = 0;
   for(const h of annTargets){
     const code6 = h.code.replace(/\D/g,"");
     try{
       const list = await fetchAnnouncements(h, code6);
       items.push(...list);
+      annCount += list.length;
       SENT.perStock[h.name] = "ok";
     }catch(e){
       SENT.perStock[h.name] = "公告获取失败";
-      errs.push(h.name+"公告："+e.message);
+      errs.push(h.name+"（"+h.code.toUpperCase()+"）公告："+e.message);
     }
     await sleep(150);
   }
   // 阶段二：焦点资讯流（按名称匹配，记录所有命中的持仓）
+  let newsCount = 0;
   try{
     const news = await fetchNewsFlow();
     for(const it of news){
@@ -795,12 +871,15 @@ async function refreshSentiment(manual){
         title:it.title||"", summary:(it.summary||"").slice(0,160),
         time:String(it.showTime||"").slice(0,10), url:it.url||"", source:it.mediaName||"东方财富资讯"
       });
+      newsCount++;
     }
   }catch(e){ errs.push("资讯流："+e.message); }
   // 排序：时间倒序
   items.sort((a,b)=>String(b.time).localeCompare(String(a.time)));
   SENT.data = items;
   SENT.lastRun = new Date();
+  SENT.errors = errs;
+  SENT.stat = {ann:annCount, news:newsCount, fail:errs.length};
   SENT.loading = false;
   $("sentLoading").style.display = "none";
   renderSentiment();
@@ -816,19 +895,26 @@ function renderSentiment(){
     return '<option value="'+esc(h.name)+'"'+(filter===h.name?" selected":"")+'>'+esc(h.name)+(h.code?" · "+esc(h.code.toUpperCase()):"")+(count?"（"+count+"）":"")+'</option>';
   })).join("");
   $("sentFilter").innerHTML = opts;
+  let head = "";
+  if(SENT.stat){
+    head += `<div class="sent-note" style="margin-bottom:10px"><b>上次收集：</b>${SENT.lastRun.toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"})} · 公告 ${SENT.stat.ann} 条 · 资讯 ${SENT.stat.news} 条${SENT.stat.fail?` · <span style="color:#ff7a6e">失败 ${SENT.stat.fail} 项</span>`:""}</div>`;
+  }
+  if(SENT.errors && SENT.errors.length){
+    head += `<div class="sent-err" style="margin-bottom:10px">⚠️ 以下数据源获取失败（网络或接口问题）：${SENT.errors.map(esc).join("；")}</div>`;
+  }
   if(!SENT.data){
-    list.innerHTML = '<div class="empty">点击「⟳ 重新收集」开始收集持仓舆情</div>';
+    list.innerHTML = head + '<div class="empty">点击「⟳ 重新收集」开始收集持仓舆情</div>';
     return;
   }
   let items = SENT.data;
   if(filter) items = items.filter(i=>(i.matched||[i.name]).includes(filter));
   if(onlyRelated) items = items.filter(i=>(i.matched||[i.name]).length>0);
   if(items.length===0){
-    list.innerHTML = '<div class="empty">暂无匹配的舆情内容（可关闭「仅显示相关」查看全部，或点卡片上的搜索按钮查看完整结果）</div>';
+    list.innerHTML = head + '<div class="empty">暂无匹配的舆情内容（可关闭「仅显示相关」查看全部，或点卡片上的搜索按钮查看完整结果）</div>';
     return;
   }
   const todayStr = today();
-  list.innerHTML = items.map(it=>{
+  list.innerHTML = head + items.map(it=>{
     const senti = classifySentiment(it.title+" "+it.summary);
     const isNew = it.time===todayStr;
     const searchUrl = "https://so.eastmoney.com/news/s?keyword="+encodeURIComponent(it.name);
@@ -861,10 +947,42 @@ function renderAll(){
   renderOverview(d);
   renderHoldingsTable(d);
   renderTrades();
+  renderCashFlows();
   renderNameList();
 }
 
+function renderCashFlows(){
+  const box = $("cashFlowList");
+  $("cfBalance").textContent = "当前可用余额："+fmt(state.cash);
+  const flows = [...state.cashFlows].sort((a,b)=> b.date.localeCompare(a.date) || b.createdAt-a.createdAt);
+  if(flows.length===0){
+    box.innerHTML = '<div class="empty" style="padding:20px 0">暂无出入金记录（银证转账、追加资金、提现等在此录入）</div>';
+    return;
+  }
+  const totalIn = flows.filter(f=>f.type==="in").reduce((s,f)=>s+f.amount,0);
+  const totalOut = flows.filter(f=>f.type==="out").reduce((s,f)=>s+f.amount,0);
+  box.innerHTML = flows.map(f=>{
+    const label = f.type==="in" ? "入金" : (f.type==="out" ? "出金" : "调整余额");
+    const sideCls = f.type==="in" ? "buy" : (f.type==="out" ? "sell" : "flat");
+    const delta = f.cashAfter - f.cashBefore;
+    return `<div class="trade-item" data-id="${f.id}">
+      <div class="t-date">${f.date}</div>
+      <span class="t-side ${sideCls}">${label}</span>
+      <div class="t-detail">
+        <span>金额 <b>${fmt(f.amount)}</b></span>
+        <span>记录后余额 <b>${fmt(f.cashAfter)}</b></span>
+        ${f.note?`<span class="t-note">${esc(f.note)}</span>`:""}
+      </div>
+      <div class="t-cash ${signCls(delta)}">${delta>=0?"+":"−"}${fmt(Math.abs(delta))}</div>
+      <button class="btn mini danger" data-act="del-cashflow" title="删除并回滚余额">删除</button>
+    </div>`;
+  }).join("")
+    + `<div class="form-tip" style="margin-top:8px">累计入金 <b>${fmt(totalIn)}</b> · 累计出金 <b>${fmt(totalOut)}</b> · 净投入 <b>${fmt(totalIn-totalOut)}</b>${state.cashFlows.some(f=>f.type==="adj")?" · 含手动调整余额记录":""}</div>`;
+}
+
 function renderMetrics(d){
+  const flowIn = state.cashFlows.filter(f=>f.type==="in").reduce((s,f)=>s+f.amount,0);
+  const flowOut = state.cashFlows.filter(f=>f.type==="out").reduce((s,f)=>s+f.amount,0);
   const cards = [
     {label:"总资产", value:fmt(d.totalAssets), cls:"", sub:"持仓市值 + 可用余额"},
     {label:"持仓市值", value:fmt(d.totalMV), cls:"", sub:"共 "+d.holdings.length+" 个标的"},
@@ -873,7 +991,8 @@ function renderMetrics(d){
      sub:d.totalCV!=null&&d.totalCV>0 ? "盈亏率 "+pct(d.totalPnl/d.totalCV) : (d.knownCostCount===0?"未录入成本价":"部分持仓未录成本")},
     {label:"已实现盈亏", value:d.realizedCount>0?fmt(d.realized):"—", cls:signCls(d.realized),
      sub:d.realizedCount>0 ? "来自 "+d.realizedCount+" 笔卖出" : (d.realizedCount===0 && state.trades.some(t=>t.side==="sell") ? "卖出时成本未知，未计入" : "暂无卖出记录")},
-    {label:"持仓成本", value:d.totalCV!=null?fmt(d.totalCV):"—", cls:"", sub:d.costKnown?"全部已录成本":(d.knownCostCount+" / "+state.holdings.length+" 个已录成本")}
+    {label:"持仓成本", value:d.totalCV!=null?fmt(d.totalCV):"—", cls:"", sub:d.costKnown?"全部已录成本":(d.knownCostCount+" / "+state.holdings.length+" 个已录成本")},
+    {label:"净投入", value:fmt(flowIn-flowOut), cls:"", sub:state.cashFlows.length===0 ? "暂无出入金记录（交易流水页录入）" : ("累计入金 "+fmt(flowIn)+" / 出金 "+fmt(flowOut))}
   ];
   $("metricCards").innerHTML = cards.map(c=>`
     <div class="card">
@@ -1056,6 +1175,41 @@ $("tradeForm").addEventListener("click", e=>{
       : "卖出将按加权平均成本计算已实现盈亏（成本未录入时不计）。卖出所得自动增加可用余额。";
   }
 });
+/* 出入金表单 */
+let cfSide = "in";
+$("cashFlowForm").addEventListener("click", e=>{
+  const b = e.target.closest(".side-toggle button");
+  if(!b) return;
+  cfSide = b.dataset.side;
+  document.querySelectorAll("#cashFlowForm .side-toggle button").forEach(x=>x.classList.remove("active"));
+  b.classList.add("active");
+  $("cfTip").textContent = cfSide==="in"
+    ? "入金增加可用余额（如银证转账转入），不影响持仓、成本与已实现盈亏。"
+    : "出金减少可用余额（如提现），金额不能超过当前可用余额。";
+});
+$("btnAddCashFlow").addEventListener("click", ()=>{
+  const date = $("cfDate").value || today();
+  const amount = num($("cfAmount").value);
+  const note = $("cfNote").value;
+  if(amount<=0) return toast("请填写正确的金额");
+  const flow = addCashFlow(cfSide, date, amount, note);
+  if(!flow) return toast("出金金额超过当前可用余额（"+fmt(state.cash)+"），无法记录");
+  save(); renderAll();
+  $("cfAmount").value=""; $("cfNote").value="";
+  toast("已记录"+(cfSide==="in"?"入金":"出金")+" "+fmt(amount)+"，可用余额已更新");
+});
+$("cashFlowList").addEventListener("click", e=>{
+  const b = e.target.closest("[data-act='del-cashflow']");
+  if(!b) return;
+  const id = b.closest(".trade-item").dataset.id;
+  const f = state.cashFlows.find(x=>x.id===id);
+  if(!f) return;
+  if(!confirm("删除这笔"+(f.type==="in"?"入金":"出金")+" "+fmt(f.amount)+"并回滚可用余额？")) return;
+  deleteCashFlow(id);
+  save(); renderAll();
+  toast("已删除并回滚余额");
+});
+
 $("btnSubmitTrade").addEventListener("click", ()=>{
   const name = $("tName").value.trim();
   const date = $("tDate").value || today();
@@ -1189,7 +1343,12 @@ $("cashCancel").addEventListener("click", ()=>$("cashModal").classList.remove("s
 $("cashConfirm").addEventListener("click", ()=>{
   const v = num($("cashInput").value);
   if(v<0) return toast("余额不能为负");
-  state.cash = v;
+  if(Math.abs(v-state.cash)>1e-9){
+    // 手动调整也记一条资金记录，保证资金重放的锚点不变式成立
+    state.cashFlows.push({id:uid(), date:today(), type:"adj", amount:Math.abs(v-state.cash),
+      note:"手动调整余额", cashBefore:state.cash, cashAfter:v, createdAt:Date.now()});
+  }
+  replayCash();
   save(); renderAll(); $("cashModal").classList.remove("show");
   toast("可用余额已更新为 "+fmt(v));
 });
@@ -1278,6 +1437,7 @@ document.addEventListener("keydown", e=>{
 
 /* ================= 启动 ================= */
 $("tDate").value = today();
+$("cfDate").value = today();
 renderAll();
 refreshQuotes(false);   // 启动即拉一次实时行情（有代码的持仓）
 </script>

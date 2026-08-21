@@ -4,6 +4,7 @@
 const SEED = {
   version: 1,
   cash: 155291.89,
+  baseCash: 155291.89,
   holdings: [
     {name:"迈威生物", shares:500,   price:32.50, cost:null, code:"sh688062"},
     {name:"联创光电", shares:400,   price:18.36, cost:null, code:"sh600363"},
@@ -17,7 +18,8 @@ const SEED = {
     {name:"赛维电子", shares:1200,  price:31.55, cost:null, code:""},
     {name:"恒生科技", shares:22800, price:0.61,  cost:null, code:""}
   ],
-  trades: []
+  trades: [],
+  cashFlows: []
 };
 
 // —— 与 index.html 保持一致的工具函数副本 ——
@@ -84,8 +86,37 @@ function deleteTrade(id){
   const t = state.trades[i];
   const h = getHolding(t.name);
   if(h){ h.shares = t.sharesBefore; h.cost = t.costBefore; }
-  state.cash = t.cashBefore;
   state.trades.splice(i,1);
+  replayCash();
+  return true;
+}
+// —— 资金重放（与 index.html 一致）：任意删除顺序余额都正确 ——
+function replayCash(){
+  const evts = [];
+  for(const t of state.trades) evts.push({order:t.createdAt, delta:t.cashAfter-t.cashBefore});
+  for(const f of state.cashFlows) evts.push({order:f.createdAt, delta:f.cashAfter-f.cashBefore});
+  evts.sort((a,b)=>a.order-b.order);
+  let cash = state.baseCash;
+  for(const e of evts) cash += e.delta;
+  state.cash = cash;
+}
+// —— 出入金（与 index.html 保持一致）——
+let cfIdc = 0;
+function addCashFlow(type, date, amount, note){
+  const cashBefore = state.cash;
+  const delta = type==="in" ? amount : -amount;
+  const cashAfter = cashBefore + delta;
+  if(type==="out" && cashAfter < -1e-9) return null;
+  const flow = { id:"cf"+(++cfIdc), date, type, amount, note:(note||"").trim(), cashBefore, cashAfter, createdAt:Date.now()+cfIdc };
+  state.cash = cashAfter;
+  state.cashFlows.push(flow);
+  return flow;
+}
+function deleteCashFlow(id){
+  const i = state.cashFlows.findIndex(f=>f.id===id);
+  if(i<0) return false;
+  state.cashFlows.splice(i,1);
+  replayCash();
   return true;
 }
 // quotes: { code → {price, ...} }，有实时价的持仓用实时价，否则用手动价
@@ -158,25 +189,25 @@ check("卖出后数量", getHolding("麦格数据").shares, 600);
 check("卖出后现金", state.cash, before + 120*200 - 10);
 check("已实现盈亏合计", recompute().realized, 3738.75);
 
-console.log("== 测试6：删除交易回滚 ==");
-// 当前状态：麦格800股/成本101.25625；迈威600股/成本5.8333；现金140786.89（测试3后144286.89 减去测试4的3500）
+console.log("== 测试6：删除交易回滚（重放语义：删除后现金=锚点+剩余全部记录净影响）==");
+// 当前状态：麦格800股/成本101.25625；迈威600股/成本5.8333；现金140786.89
 deleteTrade(sellTrade.id);
 check("回滚卖出后数量", getHolding("麦格数据").shares, 800);
 check("回滚卖出后成本", getHolding("麦格数据").cost, 101.25625);
-check("回滚卖出后现金", state.cash, 140786.89);
+check("回滚卖出后现金(剩T1麦格买+T2迈威买)", state.cash, 155291.89 - 11005 - 3500);
 check("回滚卖出后已实现盈亏", recompute().realized, 0);
-// 删除麦格数据买入（按 id 精确删除），应回到补录成本后的状态
+// 删除麦格数据买入（按 id 精确删除）：剩余迈威买入 3500 扣款仍生效
 const mgBuy = state.trades.find(t=>t.name==="麦格数据");
 deleteTrade(mgBuy.id);
 check("回滚买入后数量", getHolding("麦格数据").shares, 700);
 check("回滚买入后成本", getHolding("麦格数据").cost, 100);
-check("回滚买入后现金", state.cash, 155291.89);
-// 删除迈威生物买入（无成本持仓的买入）→ 现金恢复到该笔交易前的 144286.89（麦格买入扣款不受影响）
+check("回滚买入后现金(剩T2迈威买)", state.cash, 155291.89 - 3500);
+// 删除迈威生物买入 → 全部清空，现金回到锚点
 const mwBuy = state.trades.find(t=>t.name==="迈威生物");
 deleteTrade(mwBuy.id);
 check("回滚迈威买入后数量", getHolding("迈威生物").shares, 500);
 check("回滚迈威买入后成本", getHolding("迈威生物").cost, null);
-check("回滚迈威买入后现金", state.cash, 144286.89);
+check("回滚迈威买入后现金(记录全清)", state.cash, 155291.89);
 
 console.log("== 测试7：卖出数量超限防护（状态机级）==");
 const beforeTrade = state.trades.length;
@@ -185,7 +216,7 @@ const r = addTrade("sell","迈威生物","2026-08-21",35, 99999, 0, "");
 check("超卖返回 null", r, null);
 check("超卖不产生交易记录", state.trades.length, beforeTrade);
 check("超卖不改变数量", getHolding("迈威生物").shares, mwBefore);
-check("超卖不改变现金", state.cash, 144286.89);
+check("超卖不改变现金", state.cash, 155291.89);
 
 console.log("== 测试8：卖出（成本未知）==");
 addTrade("sell","赛维电子","2026-08-21",30, 200, 5, "");
@@ -193,7 +224,7 @@ const sv = getHolding("赛维电子");
 check("成本未知卖出后数量", sv.shares, 1000);
 check("成本未知卖出 realized=null", state.trades[state.trades.length-1].realized, null);
 check("已实现盈亏不包含该笔", recompute().realizedCount, 0);
-check("成本未知卖出后现金", state.cash, 144286.89 + 30*200 - 5);
+check("成本未知卖出后现金", state.cash, 155291.89 + 30*200 - 5);
 
 console.log("== 测试9：总资产核对 ==");
 d = recompute();
@@ -202,7 +233,7 @@ check("总市值=Σ各持仓市值", d.totalMV, mvSum);
 check("总资产=市值+现金", d.totalAssets, d.totalMV + state.cash);
 const mwMv = d.list.find(x=>x.name==="迈威生物").mv;
 check("迈威生物市值(500股×32.5)", mwMv, 16250);
-check("现金总额", d.cash, 144286.89 + 30*200 - 5);
+check("现金总额", d.cash, 155291.89 + 30*200 - 5);
 
 console.log("== 测试10：证券代码规范化 ==");
 check("600363→sh600363", normalizeCode("600363"), "sh600363");
@@ -246,6 +277,68 @@ check("中标→利好", classifySentiment("公司中标重大项目"), "bull");
 check("预增→利好", classifySentiment("业绩预增公告"), "bull");
 check("利空优先于利好", classifySentiment("重组获核准后股东减持"), "bear");
 check("无关→中性", classifySentiment("今日市场震荡整理"), "neutral");
+
+console.log("== 测试13：出入金 ==");
+// 当前状态：现金 150281.89（测试9 后）
+const c0 = state.cash;
+const fIn = addCashFlow("in","2026-08-21",10000,"银证转账");
+check("入金后现金", state.cash, c0+10000);
+check("入金记录存在", state.cashFlows.length, 1);
+check("入金记录金额", fIn.amount, 10000);
+check("入金 cashAfter", fIn.cashAfter, c0+10000);
+const fOut = addCashFlow("out","2026-08-22",2000,"提现");
+check("出金后现金", state.cash, c0+10000-2000);
+check("出金记录 cashAfter", fOut.cashAfter, c0+8000);
+// 出金超限防护
+const cfCountBefore = state.cashFlows.length;
+const r2 = addCashFlow("out","2026-08-22",1e9,"超限");
+check("超限出金返回 null", r2, null);
+check("超限不产生记录", state.cashFlows.length, cfCountBefore);
+check("超限不改变现金", state.cash, c0+8000);
+// 删除出金（逆序删除）
+deleteCashFlow(fOut.id);
+check("删除出金后现金", state.cash, c0+10000);
+check("删除出金后记录数", state.cashFlows.length, 1);
+// 删除入金
+deleteCashFlow(fIn.id);
+check("删除入金后现金", state.cash, c0);
+check("删除入金后记录数", state.cashFlows.length, 0);
+// 净投入统计
+addCashFlow("in","2026-08-21",50000,""); addCashFlow("out","2026-08-21",15000,"");
+const netIn = state.cashFlows.reduce((s,f)=>s+(f.type==="in"?f.amount:-f.amount),0);
+check("净投入=入金-出金", netIn, 35000);
+
+console.log("== 测试14：乱序删除一致性（重放）==");
+// 场景：入金 50000 → 买入 3500 → 先删除入金 → 再删除交易，现金应回到入金前
+// 构造干净基线：重置状态
+state = JSON.parse(JSON.stringify(SEED));
+const base0 = state.cash; // 155291.89
+addCashFlow("in","2026-08-21",50000,"");
+const buyT = addTrade("buy","迈威生物","2026-08-21",35,100,0,"");
+check("买入后现金", state.cash, base0+50000-3500);
+check("买入记录 cashAfter", buyT.cashAfter, base0+50000-3500);
+// 乱序：先删入金，再删交易
+const f1 = state.cashFlows[0];
+deleteCashFlow(f1.id);
+check("删入金后现金（重放）", state.cash, base0-3500);   // 只剩买入影响
+deleteTrade(buyT.id);
+check("再删交易后现金回到初始", state.cash, base0);       // 关键：无残留误差
+check("持仓数量回滚", getHolding("迈威生物").shares, 500);
+check("记录全部清空", state.trades.length+state.cashFlows.length, 0);
+// 反向乱序：先删交易，再删入金
+addCashFlow("in","2026-08-21",50000,"");
+const buyT2 = addTrade("buy","迈威生物","2026-08-21",35,100,0,"");
+deleteTrade(buyT2.id);
+check("先删交易后现金", state.cash, base0+50000);
+deleteCashFlow(state.cashFlows[0].id);
+check("再删入金后现金回到初始", state.cash, base0);
+// 手动调整余额也参与重放
+state.cashFlows.push({id:"cfx", date:"2026-08-21", type:"adj", amount:2000, note:"手动调整", cashBefore:state.cash, cashAfter:state.cash+2000, createdAt:Date.now()+9999});
+replayCash();
+check("调整余额后现金", state.cash, base0+2000);
+state.cashFlows = [];
+replayCash();
+check("清空调整后现金", state.cash, base0);
 
 console.log("\n==================");
 console.log("通过 "+pass+" 项，失败 "+fail+" 项");
