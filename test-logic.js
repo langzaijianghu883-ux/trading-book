@@ -1,5 +1,6 @@
 // 核心计算逻辑验证脚本（与 index.html 中算法保持一致）
 // 运行: node test-logic.js
+// 注意：下方 SEED 为测试专用简化数据（用于验证算法），并非 index.html 中的产品初始数据
 
 const SEED = {
   version: 1,

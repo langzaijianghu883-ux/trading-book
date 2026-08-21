@@ -250,6 +250,7 @@
       <button class="btn" id="btnCsv" title="导出流水为 CSV（Excel 可直接打开）">导出CSV</button>
       <button class="btn" id="btnExport" title="导出全部数据为 JSON 备份文件">导出备份</button>
       <button class="btn" id="btnImport">导入</button>
+      <button class="btn" id="btnSaveSeed" title="把当前数据保存为初始状态，此后「重置」恢复到此数据">保存初始</button>
       <button class="btn danger" id="btnReset">重置</button>
       <input type="file" id="fileImport" class="file-input" accept=".json,application/json">
     </div>
@@ -552,29 +553,49 @@ const signCls = n => n>0 ? "up" : (n<0 ? "down" : "flat");
 
 /* ================= 数据 ================= */
 const LS_KEY = "tradebook.v1";
+const LS_SEED_KEY = "tradebook.seed.v1";   // 用户固化的初始状态（"保存当前数据为初始状态"）
+// 初始数据 = 用户 2026-08-21 导出的真实状态（11 个持仓、成本价已录、代码已验证）
 const SEED = {
   version: 1,
-  cash: 155291.89,
+  cash: 139272.89,
   baseCash: 155291.89,   // 资金锚点：所有交易/出入金/调余额记录的起点
   holdings: [
-    {name:"迈威生物", shares:500,   price:32.50, cost:null, code:"sh688062"},
-    {name:"联创光电", shares:400,   price:18.36, cost:null, code:"sh600363"},
-    {name:"成都先导", shares:600,   price:38.70, cost:null, code:"sh688222"},
-    {name:"消费ETF",  shares:10000, price:0.831, cost:null, code:"sz159928"},
-    {name:"惠城环保", shares:200,   price:72.80, cost:null, code:"sz300779"},
-    {name:"ST京蓝",   shares:1000,  price:6.11,  cost:null, code:"sz000711"},
-    {name:"新恒汇",   shares:1400,  price:44.68, cost:null, code:"sz301678"},
-    {name:"麦格数据", shares:700,   price:128.28,cost:null, code:""},
-    {name:"金斯瑞",   shares:1000,  price:33.26, cost:null, code:"hk01548"},
-    {name:"赛维电子", shares:1200,  price:31.55, cost:null, code:""},
-    {name:"恒生科技", shares:22800, price:0.61,  cost:null, code:""}
+    {name:"迈威生物", shares:500,   price:32.50, cost:31.984, code:"sh688062", sector:"医药制造业"},
+    {name:"联创光电", shares:400,   price:18.36, cost:37.19,  code:"sh600363", sector:"计算机、通信和其他电子设备制造业"},
+    {name:"成都先导", shares:600,   price:38.70, cost:31.88,  code:"sh688222", sector:"研究和试验发展"},
+    {name:"消费ETF",  shares:10000, price:0.831, cost:0.831,  code:"sh510630", sector:""},
+    {name:"惠城环保", shares:200,   price:72.80, cost:80.80,  code:"sz300779", sector:"废弃资源综合利用业"},
+    {name:"ST京蓝",   shares:1000,  price:6.11,  cost:4.80,   code:"sz000711", sector:"废弃资源综合利用业"},
+    {name:"新恒汇",   shares:1500,  price:44.68, cost:80.59,  code:"sz301678", sector:"计算机、通信和其他电子设备制造业"},
+    {name:"麦格数据", shares:700,   price:128.28,cost:60.00,  code:"sz002851", sector:"电气机械和器材制造业"},
+    {name:"金斯瑞",   shares:1000,  price:33.26, cost:16.82,  code:"hk01548",  sector:""},
+    {name:"赛维电子", shares:1200,  price:31.55, cost:47.00,  code:"sz300456", sector:"计算机、通信和其他电子设备制造业"},
+    {name:"恒生科技", shares:22800, price:0.61,  cost:0.657,  code:"sz159742", sector:""}
   ],
-  trades: [],
+  trades: [
+    {id:"mt2pp87qao70l", date:"2026-08-21", name:"迈威生物", side:"buy", price:32.59, shares:300, fee:0, note:"", realized:null,
+     costBefore:32.2, costAfter:32.59, sharesBefore:0, sharesAfter:300, cashBefore:149049.89, cashAfter:139272.89, createdAt:1787302397654},
+    {id:"mt2pr5ggmaudu", date:"2026-08-21", name:"迈威生物", side:"buy", price:31.21, shares:200, fee:0, note:"", realized:null,
+     costBefore:32.5, costAfter:31.984, sharesBefore:300, sharesAfter:500, cashBefore:145514.89, cashAfter:139272.89, createdAt:1787302487392}
+  ],
   cashFlows: [],
   dividends: [],
-  snapshots: [],
+  snapshots: [
+    {date:"2026-08-21", totalAssets:456910.89, totalMV:317638, cash:139272.89, totalPnl:null, live:false}
+  ],
   settings: { autoRefresh:true, refreshSec:60 }
 };
+// 优先使用用户固化的初始状态
+function currentSeed(){
+  try{
+    const raw = localStorage.getItem(LS_SEED_KEY);
+    if(raw){
+      const s = JSON.parse(raw);
+      if(s && s.version===1 && Array.isArray(s.holdings)) return s;
+    }
+  }catch(e){}
+  return SEED;
+}
 let state = load();
 
 function load(){
@@ -588,7 +609,7 @@ function load(){
       }
     }
   }catch(e){}
-  return JSON.parse(JSON.stringify(SEED));
+  return JSON.parse(JSON.stringify(currentSeed()));
 }
 // 旧版本数据迁移：补 code / settings / cashFlows / baseCash 字段
 function migrate(s){
@@ -2003,15 +2024,23 @@ $("fileImport").addEventListener("change", e=>{
   e.target.value="";
 });
 $("btnReset").addEventListener("click", ()=>{
-  if(!confirm("重置将清空当前全部数据（含所有交易与持仓修改），恢复到初始导入的 11 个持仓。\n确定继续？")) return;
+  if(!confirm("重置将清空当前全部数据（含所有交易与持仓修改），恢复到"+(localStorage.getItem(LS_SEED_KEY)?"你保存的初始状态":"出厂初始数据（11 个持仓）")+"。\n确定继续？")) return;
   if(!confirm("再次确认：此操作不可撤销，是否已导出备份？")) return;
-  state = JSON.parse(JSON.stringify(SEED));
+  state = JSON.parse(JSON.stringify(currentSeed()));
   save(); renderAll();
   syncSettingsUI();
   SENT.data = null;
   toast("已重置为初始数据");
   switchPage("dashboard");
   refreshQuotes(false);
+});
+/* 保存当前数据为初始状态：此后「重置」恢复到当前这份数据 */
+$("btnSaveSeed").addEventListener("click", ()=>{
+  if(!confirm("将当前全部数据保存为「初始状态」？\n\n此后点「重置」将恢复到当前这份数据（而非出厂数据）。\n该操作只影响重置基准，不改变当前数据。")) return;
+  const copy = JSON.parse(JSON.stringify(state));
+  copy.version = 1;
+  localStorage.setItem(LS_SEED_KEY, JSON.stringify(copy));
+  toast("已保存为初始状态：重置将恢复到当前数据");
 });
 
 /* 行情工具条 */
