@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 关键：东方财富接口会拒绝带非白名单 Referer 的请求（HTTP 567），
+     页面级 no-referrer 让 fetch/script 请求不带 Referer，接口才会放行 -->
+<meta name="referrer" content="no-referrer">
 <title>我的交易本 · 个人股票交易记录</title>
 <style>
   :root{
@@ -326,6 +329,44 @@
     </div>
 
     <div class="panel" style="margin-bottom:12px">
+      <h3>分红信息 <span class="hint">① 持仓股分红方案查询（A 股，数据来自东方财富） ② 我的到账分红记录（自动计入可用余额）</span></h3>
+      <div class="form" style="margin-bottom:14px;grid-template-columns:minmax(180px,240px) auto 1fr">
+        <div class="field">
+          <label>查询分红方案</label>
+          <select id="divStock"><option value="">选择持仓…</option></select>
+        </div>
+        <div class="field" style="grid-column:auto"><label>&nbsp;</label><button class="btn" id="btnQueryDiv">查询</button></div>
+      </div>
+      <div id="divPlans"></div>
+      <div style="border-top:1px solid var(--line);margin:16px 0"></div>
+      <h3 style="margin-bottom:10px">我的分红记录</h3>
+      <div class="form" id="divRecordForm">
+        <div class="field">
+          <label>证券名称</label>
+          <input id="dName" list="nameList" placeholder="选择持仓" autocomplete="off">
+        </div>
+        <div class="field">
+          <label>到账日期</label>
+          <input type="date" id="dDate">
+        </div>
+        <div class="field">
+          <label>到账净额（元，税后）</label>
+          <input type="number" id="dNet" step="0.01" min="0" placeholder="0.00" autocomplete="off">
+        </div>
+        <div class="field" style="grid-column:span 2">
+          <label>备注（可选）</label>
+          <input id="dNote" placeholder="如：10派0.54，扣税后0.486" autocomplete="off">
+        </div>
+        <div class="form-tip">分红到账自动增加可用余额（计入总资产，不计入净投入与已实现盈亏）。</div>
+        <div class="field" style="grid-column:1/-1;display:flex;gap:10px">
+          <button class="btn primary" id="btnAddDiv" style="min-width:120px">记录分红</button>
+          <span style="align-self:center;font-size:12px;color:var(--muted)" id="divStat"></span>
+        </div>
+      </div>
+      <div id="divList" style="margin-top:14px"></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:12px">
       <h3>录入新交易</h3>
       <div class="form" id="tradeForm">
         <div class="field">
@@ -466,6 +507,7 @@ const SEED = {
   ],
   trades: [],
   cashFlows: [],
+  dividends: [],
   settings: { autoRefresh:true, refreshSec:60 }
 };
 let state = load();
@@ -487,16 +529,18 @@ function load(){
 function migrate(s){
   s.holdings.forEach(h=>{ if(h.code===undefined) h.code=""; });
   if(!Array.isArray(s.cashFlows)) s.cashFlows = [];
+  if(!Array.isArray(s.dividends)) s.dividends = [];
   if(!s.settings || typeof s.settings!=="object") s.settings = {};
   s.settings = Object.assign({autoRefresh:true, refreshSec:60}, s.settings);
   if(!(s.baseCash>0)) s.baseCash = s.cash;   // 旧数据以当前余额为锚点
 }
-// 资金重放：从锚点按时间顺序重放全部交易与出入金/调余额记录，
+// 资金重放：从锚点按时间顺序重放全部交易/出入金/分红记录，
 // 使删除任意记录（任意顺序）后余额都正确
 function replayCash(){
   const evts = [];
   for(const t of state.trades) evts.push({order:t.createdAt, delta:t.cashAfter-t.cashBefore});
   for(const f of state.cashFlows) evts.push({order:f.createdAt, delta:f.cashAfter-f.cashBefore});
+  for(const d of state.dividends) evts.push({order:d.createdAt, delta:d.net});
   evts.sort((a,b)=>a.order-b.order);
   let cash = state.baseCash;
   for(const e of evts) cash += e.delta;
@@ -623,6 +667,35 @@ function deleteCashFlow(id){
   state.cashFlows.splice(i,1);
   replayCash();   // 资金重放
   return true;
+}
+
+/* ================= 分红 ================= */
+// 录入分红：税后净额自动入账可用余额，参与资金重放
+function addDividend(name, date, net, note){
+  if(!(net>0)) return null;
+  const d = { id:uid(), date, name, net, note:(note||"").trim(), createdAt:Date.now() };
+  state.dividends.push(d);
+  state.cash += net;
+  return d;
+}
+function deleteDividend(id){
+  const i = state.dividends.findIndex(d=>d.id===id);
+  if(i<0) return false;
+  state.dividends.splice(i,1);
+  replayCash();   // 资金重放
+  return true;
+}
+// 查询持仓股分红方案（东财数据中心，A股；接口带 Referer 也放行）
+async function queryDividendPlans(name){
+  const h = getHolding(name);
+  if(!h) throw new Error("未找到持仓「"+name+"」");
+  const code6 = (h.code||"").replace(/\D/g,"");
+  if(!code6) throw new Error("「"+name+"」未填证券代码，无法查询");
+  const url = "https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_SHAREBONUS_DET&columns=ALL&filter=(SECURITY_CODE%3D%22"+code6+"%22)&pageNumber=1&pageSize=6&sortColumns=EX_DIVIDEND_DATE&sortTypes=-1";
+  const r = await fetchWithTimeout(url, 10000);
+  if(!r.ok) throw new Error(friendlyHttp(r.status));
+  const j = await r.json();
+  return (j.result && j.result.data) || [];
 }
 
 /* ================= 实时行情 ================= */
@@ -808,7 +881,7 @@ const SENTI_LABEL = {bear:"利空", bull:"利好", neutral:"中性"};
 async function fetchAnnouncements(h, code6){
   const url = "https://np-anotice-stock.eastmoney.com/api/security/ann?sr=-1&page_size=8&page_index=1&ann_type=A&client_source=web&stock_list="+code6;
   const r = await fetchWithTimeout(url, 10000);
-  if(!r.ok) throw new Error("HTTP "+r.status);
+  if(!r.ok) throw new Error(friendlyHttp(r.status));
   const j = await r.json();
   return ((j.data&&j.data.list)||[]).map(a=>({
     name:h.name, code:h.code, kind:"ann",
@@ -818,6 +891,13 @@ async function fetchAnnouncements(h, code6){
     url:"https://data.eastmoney.com/notices/detail/"+code6+"/"+a.art_code+".html",
     source:"交易所公告"
   }));
+}
+// 数据源错误翻译：567 是东财对非白名单 Referer 的拦截，403/429 多为限流
+function friendlyHttp(status){
+  if(status===567) return "接口拒绝访问(567)，已自动去除来源标识，可点「重新收集」重试";
+  if(status===403) return "接口拒绝(403)，可能被限流，请稍后重试";
+  if(status===429) return "请求过于频繁(429)，请稍后重试";
+  return "接口返回异常(HTTP "+status+")";
 }
 // ② 东方财富资讯流（fetch + CORS，按持仓名称过滤；326=当日要闻、333=焦点补充）
 // 注：该接口回调参数名为 callback（非 cb），且本身支持 CORS，直接 fetch 最稳妥
@@ -948,7 +1028,57 @@ function renderAll(){
   renderHoldingsTable(d);
   renderTrades();
   renderCashFlows();
+  renderDividends();
   renderNameList();
+}
+
+function renderDividends(){
+  const sel = $("divStock");
+  const prevVal = sel.value;
+  const opts = ['<option value="">选择持仓…</option>'].concat(state.holdings.map(h=>
+    '<option value="'+esc(h.name)+'">'+esc(h.name)+(h.code?" · "+esc(h.code.toUpperCase()):"（未填代码）")+'</option>'
+  )).join("");
+  sel.innerHTML = opts;
+  if(prevVal && state.holdings.some(h=>h.name===prevVal)) sel.value = prevVal;
+  // 我的分红记录
+  const list = [...state.dividends].sort((a,b)=> b.date.localeCompare(a.date) || b.createdAt-a.createdAt);
+  const total = state.dividends.reduce((s,d)=>s+d.net,0);
+  $("divStat").textContent = state.dividends.length===0 ? "" : ("累计分红 "+fmt(total)+" 元 · "+state.dividends.length+" 笔");
+  if(list.length===0){
+    $("divList").innerHTML = '<div class="empty" style="padding:20px 0">暂无分红记录（分红到账后在此录入，自动增加可用余额）</div>';
+    return;
+  }
+  $("divList").innerHTML = list.map(d=>`
+    <div class="trade-item" data-id="${d.id}">
+      <div class="t-date">${d.date}</div>
+      <span class="t-side buy">分红</span>
+      <div class="t-detail">
+        <span><b>${esc(d.name)}</b></span>
+        <span>到账净额 <b>${fmt(d.net)}</b></span>
+        ${d.note?`<span class="t-note">${esc(d.note)}</span>`:""}
+      </div>
+      <div class="t-cash up">+${fmt(d.net)}</div>
+      <button class="btn mini danger" data-act="del-div" title="删除并回滚余额">删除</button>
+    </div>`).join("");
+}
+function renderDivPlans(name, plans, err){
+  const box = $("divPlans");
+  if(err){ box.innerHTML = `<div class="sent-err">${esc(err)}</div>`; return; }
+  if(!plans || plans.length===0){
+    box.innerHTML = '<div class="form-tip">未查询到「'+esc(name)+'」的分红方案（可能从未分红、已退市或代码有误）</div>';
+    return;
+  }
+  box.innerHTML = `<div class="tbl-wrap"><table class="tbl" style="min-width:580px"><thead><tr>
+    <th>报告期</th><th>分红方案</th><th>除息日</th><th>股权登记日</th><th>税前每股(元)</th><th>状态</th>
+  </tr></thead><tbody>` + plans.map(p=>`
+    <tr>
+      <td>${esc(String(p.REPORT_DATE||"").slice(0,10))}</td>
+      <td>${esc(p.IMPL_PLAN_PROFILE||"—")}</td>
+      <td>${esc(String(p.EX_DIVIDEND_DATE||"").slice(0,10))||"—"}</td>
+      <td>${esc(String(p.EQUITY_RECORD_DATE||"").slice(0,10))||"—"}</td>
+      <td>${p.PRETAX_BONUS_RMB!=null?p.PRETAX_BONUS_RMB:"—"}</td>
+      <td>${esc(p.ASSIGN_PROGRESS||"—")}</td>
+    </tr>`).join("") + `</tbody></table></div>`;
 }
 
 function renderCashFlows(){
@@ -992,7 +1122,8 @@ function renderMetrics(d){
     {label:"已实现盈亏", value:d.realizedCount>0?fmt(d.realized):"—", cls:signCls(d.realized),
      sub:d.realizedCount>0 ? "来自 "+d.realizedCount+" 笔卖出" : (d.realizedCount===0 && state.trades.some(t=>t.side==="sell") ? "卖出时成本未知，未计入" : "暂无卖出记录")},
     {label:"持仓成本", value:d.totalCV!=null?fmt(d.totalCV):"—", cls:"", sub:d.costKnown?"全部已录成本":(d.knownCostCount+" / "+state.holdings.length+" 个已录成本")},
-    {label:"净投入", value:fmt(flowIn-flowOut), cls:"", sub:state.cashFlows.length===0 ? "暂无出入金记录（交易流水页录入）" : ("累计入金 "+fmt(flowIn)+" / 出金 "+fmt(flowOut))}
+    {label:"净投入", value:fmt(flowIn-flowOut), cls:"", sub:state.cashFlows.length===0 ? "暂无出入金记录（交易流水页录入）" : ("累计入金 "+fmt(flowIn)+" / 出金 "+fmt(flowOut))},
+    {label:"累计分红", value:fmt(state.dividends.reduce((s,d)=>s+d.net,0)), cls:"", sub:state.dividends.length===0 ? "暂无分红记录（交易流水页录入）" : ("来自 "+state.dividends.length+" 笔分红")}
   ];
   $("metricCards").innerHTML = cards.map(c=>`
     <div class="card">
@@ -1206,6 +1337,46 @@ $("cashFlowList").addEventListener("click", e=>{
   if(!f) return;
   if(!confirm("删除这笔"+(f.type==="in"?"入金":"出金")+" "+fmt(f.amount)+"并回滚可用余额？")) return;
   deleteCashFlow(id);
+  save(); renderAll();
+  toast("已删除并回滚余额");
+});
+
+/* 分红 */
+$("btnQueryDiv").addEventListener("click", async ()=>{
+  const name = $("divStock").value;
+  if(!name) return toast("请先选择持仓");
+  const btn = $("btnQueryDiv");
+  btn.textContent = "查询中…"; btn.disabled = true;
+  try{
+    const plans = await queryDividendPlans(name);
+    renderDivPlans(name, plans, null);
+    if(plans.length) toast("已查询到 "+plans.length+" 期分红方案");
+  }catch(e){
+    renderDivPlans(name, null, e.message);
+  }finally{
+    btn.textContent = "查询"; btn.disabled = false;
+  }
+});
+$("btnAddDiv").addEventListener("click", ()=>{
+  const name = $("dName").value.trim();
+  const date = $("dDate").value || today();
+  const net = num($("dNet").value);
+  const note = $("dNote").value;
+  if(!name) return toast("请填写证券名称");
+  if(net<=0) return toast("请填写正确的到账净额");
+  addDividend(name, date, net, note);
+  save(); renderAll();
+  $("dNet").value=""; $("dNote").value="";
+  toast("已记录分红 "+fmt(net)+" 元，已计入可用余额");
+});
+$("divList").addEventListener("click", e=>{
+  const b = e.target.closest("[data-act='del-div']");
+  if(!b) return;
+  const id = b.closest(".trade-item").dataset.id;
+  const d = state.dividends.find(x=>x.id===id);
+  if(!d) return;
+  if(!confirm("删除这笔分红（"+d.name+" "+fmt(d.net)+" 元）并回滚可用余额？")) return;
+  deleteDividend(id);
   save(); renderAll();
   toast("已删除并回滚余额");
 });
@@ -1438,6 +1609,7 @@ document.addEventListener("keydown", e=>{
 /* ================= 启动 ================= */
 $("tDate").value = today();
 $("cfDate").value = today();
+$("dDate").value = today();
 renderAll();
 refreshQuotes(false);   // 启动即拉一次实时行情（有代码的持仓）
 </script>

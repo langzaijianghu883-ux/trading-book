@@ -19,7 +19,8 @@ const SEED = {
     {name:"恒生科技", shares:22800, price:0.61,  cost:null, code:""}
   ],
   trades: [],
-  cashFlows: []
+  cashFlows: [],
+  dividends: []
 };
 
 // —— 与 index.html 保持一致的工具函数副本 ——
@@ -95,10 +96,27 @@ function replayCash(){
   const evts = [];
   for(const t of state.trades) evts.push({order:t.createdAt, delta:t.cashAfter-t.cashBefore});
   for(const f of state.cashFlows) evts.push({order:f.createdAt, delta:f.cashAfter-f.cashBefore});
+  for(const d of state.dividends) evts.push({order:d.createdAt, delta:d.net});
   evts.sort((a,b)=>a.order-b.order);
   let cash = state.baseCash;
   for(const e of evts) cash += e.delta;
   state.cash = cash;
+}
+// —— 分红（与 index.html 保持一致）——
+let dIdc = 0;
+function addDividend(name, date, net, note){
+  if(!(net>0)) return null;
+  const d = { id:"div"+(++dIdc), date, name, net, note:(note||"").trim(), createdAt:Date.now()+dIdc };
+  state.dividends.push(d);
+  state.cash += net;
+  return d;
+}
+function deleteDividend(id){
+  const i = state.dividends.findIndex(d=>d.id===id);
+  if(i<0) return false;
+  state.dividends.splice(i,1);
+  replayCash();
+  return true;
 }
 // —— 出入金（与 index.html 保持一致）——
 let cfIdc = 0;
@@ -339,6 +357,42 @@ check("调整余额后现金", state.cash, base0+2000);
 state.cashFlows = [];
 replayCash();
 check("清空调整后现金", state.cash, base0);
+
+console.log("== 测试15：分红 ==");
+// 当前状态：测试14 末尾，现金=baseCash=155291.89，记录全清
+const b0 = state.cash;
+const div1 = addDividend("联创光电","2026-08-21",1944,"10派0.54，扣税后0.486×400股");
+check("分红后现金", state.cash, b0+1944);
+check("分红记录存在", state.dividends.length, 1);
+check("分红净额", div1.net, 1944);
+const div2 = addDividend("迈威生物","2026-08-20",500,"");
+check("两笔分红后现金", state.cash, b0+2444);
+check("累计分红统计", state.dividends.reduce((s,d)=>s+d.net,0), 2444);
+// 非法净额防护
+const r3 = addDividend("迈威生物","2026-08-20",0,"");
+check("净额0返回 null", r3, null);
+check("非法不产生记录", state.dividends.length, 2);
+// 删除分红（重放回滚）
+deleteDividend(div1.id);
+check("删除分红后现金", state.cash, b0+500);
+check("删除后记录数", state.dividends.length, 1);
+deleteDividend(div2.id);
+check("删净后现金回到锚点", state.cash, b0);
+// 混合乱序删除：分红+交易+出入金
+state = JSON.parse(JSON.stringify(SEED));
+const m0 = state.cash;
+addCashFlow("in","2026-08-21",50000,"");
+addDividend("联创光电","2026-08-21",1944,"");
+const bt = addTrade("buy","迈威生物","2026-08-21",35,100,0,"");
+check("混合后现金", state.cash, m0+50000+1944-3500);
+// 乱序删除：先删交易、再删分红、再删入金
+deleteTrade(bt.id);
+check("删交易后现金", state.cash, m0+50000+1944);
+deleteDividend(state.dividends[0].id);
+check("删分红后现金", state.cash, m0+50000);
+deleteCashFlow(state.cashFlows[0].id);
+check("删入金后现金回到锚点", state.cash, m0);
+check("持仓数量回滚", getHolding("迈威生物").shares, 500);
 
 console.log("\n==================");
 console.log("通过 "+pass+" 项，失败 "+fail+" 项");
