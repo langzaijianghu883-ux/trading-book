@@ -1506,13 +1506,30 @@ function renderTodayChart(svg, wrap, t){
   const pnls = pts.map(p=>p.pnl);
   const minP = Math.min(...pnls), maxP = Math.max(...pnls);
   const range = Math.max(maxP - minP, 1);  // 防 0 除
-  // 时间区间：当天 0 点 ~ 24 点（横轴自动映射）
-  const t0 = new Date(t.date+"T00:00:00").getTime();
-  const t1 = t0 + 86400000;
-  const xOf = ts => padL + (ts - t0) / (t1 - t0) * (w - padL - padR);
+  // 横轴：A 股交易时段 9:30~11:30 + 13:00~15:00（午休留白）
+  const baseTs = new Date(t.date+"T00:00:00").getTime();
+  const M0 = 9.5*3600*1000, M1 = 11.5*3600*1000;   // 上午 9:30~11:30
+  const A0 = 13*3600*1000,   A1 = 15*3600*1000;     // 下午 13:00~15:00
+  const chartW = w - padL - padR;
+  const halfW = chartW / 2;                          // 上午段宽度 = 下午段宽度
+  // xOf：返回 null 表示该点在非交易时段（应跳过）
+  const xOf = ts => {
+    const off = ts - baseTs;
+    if(off < M0) return null;                          // 开盘前
+    if(off <= M1) return padL + (off - M0)/(M1 - M0) * halfW;
+    if(off < A0) return null;                          // 午休
+    if(off <= A1) return padL + halfW + (off - A0)/(A1 - A0) * halfW;
+    return null;                                        // 收盘后
+  };
+  // 仅保留交易时段内的点（开盘前/午休/收盘后不入曲线）
+  const validPts = pts.filter(p => xOf(p.t) != null);
+  if(validPts.length === 0){
+    svg.innerHTML = `<text x="300" y="80" text-anchor="middle" fill="#8b98ab" font-size="13">非交易时段（9:30~11:30 / 13:00~15:00）</text>`;
+    return;
+  }
   const yOf = p  => padT + (1 - (p - minP) / range) * (h - padT - padB);
   const yZero = (maxP>0 && minP<0) ? yOf(0) : null;
-  const ptsStr = pts.map(p => `${xOf(p.t).toFixed(1)},${yOf(p.pnl).toFixed(1)}`).join(" ");
+  const ptsStr = validPts.map(p => `${xOf(p.t).toFixed(1)},${yOf(p.pnl).toFixed(1)}`).join(" ");
   const color = maxP>=0 && minP<=0 ? "#7b5cff" : (maxP>0 ? "#f0483e" : "#17b26a");
   const fillColor = color + "22";
   // 折线 + 填充
@@ -1520,25 +1537,32 @@ function renderTodayChart(svg, wrap, t){
   if(yZero!=null){
     html += `<line x1="${padL}" y1="${yZero}" x2="${w-padR}" y2="${yZero}" stroke="#3a4658" stroke-width="1" stroke-dasharray="3,3"/>`;
   }
-  // 填充区
-  if(pts.length>1){
-    const polyFill = `M ${xOf(pts[0].t).toFixed(1)},${(yZero||yOf(0)).toFixed(1)} L ${ptsStr} L ${xOf(pts[pts.length-1].t).toFixed(1)},${(yZero||yOf(0)).toFixed(1)} Z`;
+  // 午休分隔线（上午末到下午首之间）
+  const xMid = padL + halfW;
+  html += `<line x1="${xMid}" y1="${padT}" x2="${xMid}" y2="${h-padB}" stroke="#262f3d" stroke-width="1"/>`;
+  html += `<text x="${xMid}" y="${padT-2}" text-anchor="middle" fill="#3a4658" font-size="9">午休</text>`;
+  // 填充区（仅包络有效点）
+  if(validPts.length>1){
+    const polyFill = `M ${xOf(validPts[0].t).toFixed(1)},${(yZero||yOf(0)).toFixed(1)} L ${ptsStr} L ${xOf(validPts[validPts.length-1].t).toFixed(1)},${(yZero||yOf(0)).toFixed(1)} Z`;
     html += `<path d="${polyFill}" fill="${fillColor}" stroke="none"/>`;
   }
   html += `<polyline points="${ptsStr}" fill="none" stroke="${color}" stroke-width="1.5"/>`;
   // 端点标记
-  const last = pts[pts.length-1];
+  const last = validPts[validPts.length-1];
   html += `<circle cx="${xOf(last.t).toFixed(1)}" cy="${yOf(last.pnl).toFixed(1)}" r="3" fill="${color}"/>`;
   // 标签：最大值/最小值/末值
-  const maxIdx = pnls.indexOf(maxP), minIdx = pnls.indexOf(minP);
-  const fmtHM = ts => new Date(ts).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"});
-  if(pts.length>1){
-    html += `<text x="${xOf(pts[maxIdx].t).toFixed(1)}" y="${(yOf(maxP)-4).toFixed(1)}" text-anchor="middle" fill="#f0483e" font-size="10">+${fmt(maxP)}</text>`;
-    html += `<text x="${xOf(pts[minIdx].t).toFixed(1)}" y="${(yOf(minP)+12).toFixed(1)}" text-anchor="middle" fill="#17b26a" font-size="10">${fmt(minP)}</text>`;
+  const validPnls = validPts.map(p=>p.pnl);
+  const maxP2 = Math.max(...validPnls), minP2 = Math.min(...validPnls);
+  const maxIdx = validPnls.indexOf(maxP2), minIdx = validPnls.indexOf(minP2);
+  if(validPts.length>1){
+    html += `<text x="${xOf(validPts[maxIdx].t).toFixed(1)}" y="${(yOf(maxP2)-4).toFixed(1)}" text-anchor="middle" fill="#f0483e" font-size="10">+${fmt(maxP2)}</text>`;
+    html += `<text x="${xOf(validPts[minIdx].t).toFixed(1)}" y="${(yOf(minP2)+12).toFixed(1)}" text-anchor="middle" fill="#17b26a" font-size="10">${fmt(minP2)}</text>`;
   }
-  html += `<text x="${padL}" y="${h-4}" fill="#8b98ab" font-size="10">00:00</text>`;
-  html += `<text x="${w/2}" y="${h-4}" text-anchor="middle" fill="#8b98ab" font-size="10">12:00</text>`;
-  html += `<text x="${w-padR}" y="${h-4}" text-anchor="end" fill="#8b98ab" font-size="10">24:00</text>`;
+  // 横轴标签：4 个时间点 + 中心分隔
+  html += `<text x="${padL}" y="${h-4}" fill="#8b98ab" font-size="10">9:30</text>`;
+  html += `<text x="${padL+halfW}" y="${h-4}" text-anchor="middle" fill="#8b98ab" font-size="10">11:30</text>`;
+  html += `<text x="${xMid}" y="${h-4}" text-anchor="middle" fill="#8b98ab" font-size="10">13:00</text>`;
+  html += `<text x="${w-padR}" y="${h-4}" text-anchor="end" fill="#8b98ab" font-size="10">15:00</text>`;
   svg.innerHTML = html;
 }
 

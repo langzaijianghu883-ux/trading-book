@@ -643,6 +643,37 @@ check("指数-深证代码", INDEX_LIST_TEST[1].code, "sz399001");
 check("指数-创业板代码", INDEX_LIST_TEST[2].code, "sz399006");
 check("指数-科创50 代码", INDEX_LIST_TEST[3].code, "sh000688");
 
+/* ================= 分时图交易时段映射逻辑 ================= */
+// 复制 index.html 中 xOf 函数的纯函数逻辑
+function makeXOf(baseTs, padL, halfW){
+  const M0 = 9.5*3600*1000, M1 = 11.5*3600*1000;
+  const A0 = 13*3600*1000,   A1 = 15*3600*1000;
+  return ts => {
+    const off = ts - baseTs;
+    if(off < M0) return null;
+    if(off <= M1) return padL + (off - M0)/(M1 - M0) * halfW;
+    if(off < A0) return null;
+    if(off <= A1) return padL + halfW + (off - A0)/(A1 - A0) * halfW;
+    return null;
+  };
+}
+// 测试：固定日期 2026-08-25 (假设周二)，逐时刻验证 xOf
+const baseTs = new Date("2026-08-25T00:00:00").getTime();
+const xOf = makeXOf(baseTs, 0, 100);
+
+check("交易时段-09:30 起点 x=0", xOf(baseTs + 9.5*3600*1000), 0);
+check("交易时段-09:30:01 上午段起点", xOf(baseTs + 9.5*3600*1000 + 60000) > 0, true);
+check("交易时段-10:30 上午段中点", xOf(baseTs + 10.5*3600*1000), 50);
+check("交易时段-11:30 上午段终点 x=100", xOf(baseTs + 11.5*3600*1000), 100);
+check("交易时段-11:30:01 午休（应被过滤）", xOf(baseTs + 11.5*3600*1000 + 60000), null);
+check("交易时段-12:30 午休（应被过滤）", xOf(baseTs + 12.5*3600*1000), null);
+check("交易时段-12:59:59 午休（应被过滤）", xOf(baseTs + 12.99*3600*1000), null);
+check("交易时段-13:00 下午段起点 x=100", xOf(baseTs + 13*3600*1000), 100);
+check("交易时段-14:00 下午段中点 x=150", xOf(baseTs + 14*3600*1000), 150);
+check("交易时段-15:00 收盘 x=200", xOf(baseTs + 15*3600*1000), 200);
+check("交易时段-15:01 收盘后（应被过滤）", xOf(baseTs + 15.01*3600*1000), null);
+check("交易时段-09:29:59 开盘前（应被过滤）", xOf(baseTs + 9.49*3600*1000), null);
+
 console.log("\n==================");
 console.log("通过 "+pass+" 项，失败 "+fail+" 项");
 process.exit(fail>0?1:0);
