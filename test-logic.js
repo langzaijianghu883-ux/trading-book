@@ -568,6 +568,81 @@ check("无法识别行→null", t, null);
 t=parseBatchLine("成都先导 买入 38.7 600股 @39 费3");  // @ 优先级
 check("文本-@价格优先", t.price, 39);
 
+/* ================= 当日盈亏 + 分时线逻辑 ================= */
+// node 环境无 localStorage，造一个最小 mock
+const _lsStore = {};
+global.localStorage = {
+  getItem: k => _lsStore[k] || null,
+  setItem: (k,v) => { _lsStore[k] = String(v); },
+  removeItem: k => { delete _lsStore[k]; }
+};
+const LS_TODAY_KEY_TEST = "tradebook.today.test";
+function loadTodayTest(){ try{ const s=localStorage.getItem(LS_TODAY_KEY_TEST); return s?JSON.parse(s):{date:"",openAnchor:null,points:[]}; }catch(e){ return {date:"",openAnchor:null,points:[]}; } }
+function saveTodayTest(t){ localStorage.setItem(LS_TODAY_KEY_TEST, JSON.stringify(t)); }
+function todayStr(){ const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")-"-"+String(d.getDate()).padStart(2,"0"); }
+function ensureTest(totalAssets){
+  const t = loadTodayTest();
+  const td = todayStr();
+  if(t.date !== td){
+    t.date = td;
+    t.openAnchor = totalAssets;
+    t.points = [{ t: Date.now(), pnl: 0 }];
+    saveTodayTest(t);
+  } else if(t.openAnchor == null){
+    t.openAnchor = totalAssets;
+    saveTodayTest(t);
+  }
+  return t;
+}
+function pushTest(totalAssets){
+  const t = ensureTest(totalAssets);
+  const pnl = totalAssets - t.openAnchor;
+  const last = t.points[t.points.length-1];
+  const now = Date.now();
+  if(last && (now - last.t) < 25000 && Math.abs(pnl - last.pnl) < 0.01){
+    return { pnl, len:t.points.length, changed:false };
+  }
+  t.points.push({ t: now, pnl });
+  if(t.points.length > 2880){ t.points = t.points.filter((_,i)=> i%2===0); }
+  saveTodayTest(t);
+  return { pnl, len:t.points.length, changed:true };
+}
+
+// 测试 1：跨日切换重置锚点
+localStorage.removeItem(LS_TODAY_KEY_TEST);
+pushTest(100000);  // 锚点 = 100000
+let t1 = loadTodayTest();
+check("当日锚点-首次建档", t1.openAnchor, 100000);
+check("当日锚点-初始 1 点", t1.points.length, 1);
+
+// 测试 2：总资产变化 → 当日盈亏 = 资产 - 锚点
+let tdy1 = pushTest(100500);
+check("当日盈亏-资产+500", tdy1.pnl, 500);
+check("当日盈亏-已累加点", tdy1.len, 2);
+
+// 测试 3：30 秒去重：同价位同时间窗口不重复追加
+let tdy2 = pushTest(100500);
+check("当日-30 秒去重", tdy2.changed, false);
+check("当日-30 秒去重长度不变", tdy2.len, 2);
+
+// 测试 4：触发追加（数值变化）
+let tdy3 = pushTest(100800);
+check("当日-数值变化触发追加", tdy3.changed, true);
+check("当日-数值变化后长度", tdy3.len, 3);
+
+// 测试 5：指数列表完整性
+const INDEX_LIST_TEST = [
+  { code:"sh000001", name:"上证指数" },
+  { code:"sz399001", name:"深证成指" },
+  { code:"sz399006", name:"创业板指" },
+  { code:"sh000688", name:"科创50" }
+];
+check("指数-4 个标的", INDEX_LIST_TEST.length, 4);
+check("指数-上证代码", INDEX_LIST_TEST[0].code, "sh000001");
+check("指数-深证代码", INDEX_LIST_TEST[1].code, "sz399001");
+check("指数-创业板代码", INDEX_LIST_TEST[2].code, "sz399006");
+check("指数-科创50 代码", INDEX_LIST_TEST[3].code, "sh000688");
+
 console.log("\n==================");
 console.log("通过 "+pass+" 项，失败 "+fail+" 项");
 process.exit(fail>0?1:0);

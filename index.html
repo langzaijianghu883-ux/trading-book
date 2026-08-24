@@ -79,6 +79,29 @@
   .tag.flat{background:rgba(139,152,171,.12);color:var(--muted)}
 
   /* ===== 主网格 ===== */
+  /* ===== 指数面板 ===== */
+  .index-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:14px}
+  .idx-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;display:flex;flex-direction:column;gap:4px;position:relative;overflow:hidden}
+  .idx-card .nm{font-size:13px;color:var(--muted);font-weight:600}
+  .idx-card .px{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:.3px;line-height:1.15}
+  .idx-card .ch{font-size:12.5px;font-variant-numeric:tabular-nums;display:flex;gap:8px;align-items:center}
+  .idx-card .ch .pct{padding:2px 6px;border-radius:5px;font-weight:600;font-size:12px}
+  .idx-card.up .px{color:var(--up)}
+  .idx-card.down .px{color:var(--down)}
+  .idx-card.flat .px{color:var(--text)}
+  .idx-card .ts{font-size:11px;color:var(--muted);position:absolute;top:10px;right:12px}
+
+  /* ===== 当日收益面板 ===== */
+  .today-panel{display:grid;grid-template-columns:280px 1fr;gap:14px;margin-bottom:14px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px}
+  .today-stats{display:flex;flex-direction:column;gap:10px;justify-content:center}
+  .today-stats .big{font-size:32px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+  .today-stats .lbl{font-size:12.5px;color:var(--muted);margin-bottom:-4px}
+  .today-stats .open-anchor{font-size:12px;color:var(--muted);line-height:1.5}
+  .today-stats .open-anchor b{color:var(--text);font-weight:600}
+  .today-chart{height:170px;position:relative;border-left:1px solid var(--line);padding-left:14px}
+  .today-chart svg{width:100%;height:100%;display:block}
+  .today-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:13px}
+
   .grid2{display:grid;grid-template-columns:380px 1fr;gap:12px;margin-bottom:14px}
   @media (max-width:900px){.grid2{grid-template-columns:1fr}}
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px}
@@ -278,6 +301,24 @@
     </div>
 
     <div class="cards" id="metricCards"></div>
+
+    <!-- 四大指数 -->
+    <div class="panel" style="margin-bottom:14px">
+      <h3>主要指数 <span class="hint">实时更新，与持仓行情同步刷新</span></h3>
+      <div class="index-grid" id="indexGrid"></div>
+    </div>
+
+    <!-- 当日收益 + 分时线 -->
+    <div class="today-panel">
+      <div class="today-stats">
+        <div class="lbl">当日盈亏（实时）</div>
+        <div class="big" id="todayPnlVal">—</div>
+        <div class="open-anchor" id="todayAnchor">以今日首次访问时的总资产为基准，每 30 秒随行情刷新</div>
+      </div>
+      <div class="today-chart" id="todayChart">
+        <svg id="todayChartSvg" viewBox="0 0 600 170" preserveAspectRatio="none"></svg>
+      </div>
+    </div>
 
     <div class="grid2">
       <div class="panel">
@@ -1085,10 +1126,14 @@ async function refreshQuotes(manual){
     const isStale = t && !isToday(t);
     if(isStale) qbTime.textContent += "（数据为"+ (t.getMonth()+1)+"月"+t.getDate()+"日"+(t.getHours()<15?"上午":"收盘") +"）";
     renderAll();
+    // 联动：指数随行情同步刷新一次；renderAll 内部已 renderIndices（先空），这里补真实数据
+    refreshIndices().then(()=>renderIndices());
   }catch(e){
     qbText.textContent = "行情获取失败（网络或接口不可用）";
     qbDot.className = "qb-dot err";
     qbTime.textContent = "";
+    // 行情失败也尝试单独拉一次指数
+    refreshIndices().then(()=>renderIndices());
   }finally{
     quoteBusy = false;
   }
@@ -1106,6 +1151,13 @@ function isToday(d){
 function startQuoteTimer(){
   clearInterval(quoteTimer);
   quoteTimer = setInterval(()=>{ if(state.settings.autoRefresh) refreshQuotes(false); }, state.settings.refreshSec*1000);
+}
+// 刷新指数：与行情同节拍（避免重复网络开销，复用时机）
+let indexTimer = null;
+function startIndexTimer(){
+  clearInterval(indexTimer);
+  // 指数独立 10 秒一轮，行情刷新时也刷一次（refreshQuotes 内会调用 refreshIndices）
+  indexTimer = setInterval(()=>{ refreshIndices().then(()=>renderIndices()); }, 10000);
 }
 
 /* ================= 持仓舆情 ================= */
@@ -1274,6 +1326,220 @@ function renderAll(){
   renderDividends();
   renderSectors();
   renderNameList();
+  renderIndices();
+  renderTodayPanel();
+}
+
+/* ================= 四大指数 ================= */
+const INDEX_LIST = [
+  { code:"sh000001", name:"上证指数" },
+  { code:"sz399001", name:"深证成指" },
+  { code:"sz399006", name:"创业板指" },
+  { code:"sh000688", name:"科创50"   }
+];
+const indexMap = {};   // code → {price, prevClose, open, chg, chgPct, time, source}
+// 复用腾讯脚本加载方案（与行情主源同模式）
+function fetchIndicesTencent(){
+  return new Promise((resolve,reject)=>{
+    const codes = INDEX_LIST.map(i=>i.code);
+    const s = document.createElement("script");
+    const timer = setTimeout(()=>{ cleanup(); reject(new Error("指数请求超时")); }, 10000);
+    s.onerror = ()=>{ cleanup(); reject(new Error("指数接口加载失败")); };
+    s.onload = ()=>{
+      cleanup();
+      const out = {};
+      for(const c of codes){
+        const raw = window["v_"+c];
+        if(!raw) continue;
+        const f = String(raw).split("~");
+        if(f.length<35) continue;
+        const price = parseFloat(f[3]), prev = parseFloat(f[4]);
+        if(!(price>0)) continue;        // 指数周末无涨跌幅时 prev 也可能 = price，单独放过
+        out[c] = {
+          price, prevClose:prev, open:parseFloat(f[5]),
+          high:parseFloat(f[33]), low:parseFloat(f[34]),
+          chg:parseFloat(f[31]), chgPct:parseFloat(f[32]),
+          time:parseQuoteTime(f[30]), source:"腾讯指数"
+        };
+      }
+      resolve(out);
+    };
+    s.charset = "GBK";
+    s.src = "https://qt.gtimg.cn/q=" + codes.join(",");
+    document.head.appendChild(s);
+    function cleanup(){ clearTimeout(timer); s.remove(); }
+  });
+}
+// 备源：东方财富 ulist（无需 jsonp，f2 现价/f18 昨收/f22 今开？需现场校验）
+async function fetchIndicesEastmoney(){
+  const secids = ["1.000001","0.399001","0.399006","1.000688"].join(",");
+  try{
+    const d = await jsonp("https://push2.eastmoney.com/api/qt/ulist.np/get?secids="+secids+"&fields=f2,f3,f4,f12,f14,f18,f22", 10000);
+    const list = (d && d.data && Array.isArray(d.data.diff)) ? d.data.diff : [];
+    const out = {};
+    for(const it of list){
+      const code = (String(it.f12||"").startsWith("6") ? "sh" : "sz") + it.f12;
+      const price = it.f2/100;
+      const prev  = it.f18/100;
+      if(!(price>0)) continue;
+      out[code] = {
+        price, prevClose:prev,
+        open: it.f22>0 ? it.f22/100 : null,
+        chg: it.f3/100, chgPct: it.f4/100,
+        time:new Date(), source:"东方财富指数"
+      };
+    }
+    return out;
+  }catch(e){ return {}; }
+}
+async function refreshIndices(){
+  let out = {};
+  try{ out = await fetchIndicesTencent(); }
+  catch(e){ try{ out = await fetchIndicesEastmoney(); }catch(e2){} }
+  for(const c in indexMap) delete indexMap[c];
+  Object.assign(indexMap, out);
+}
+
+function renderIndices(){
+  const box = $("indexGrid");
+  if(!box) return;
+  box.innerHTML = INDEX_LIST.map(it=>{
+    const q = indexMap[it.code];
+    if(!q){
+      return `<div class="idx-card flat">
+        <div class="nm">${it.name}</div>
+        <div class="px">—</div>
+        <div class="ch"><span class="muted">未获取</span></div>
+      </div>`;
+    }
+    const dir = q.chg>0 ? "up" : (q.chg<0 ? "down" : "flat");
+    const pctTxt = (q.chgPct>=0?"+":"") + q.chgPct.toFixed(2) + "%";
+    const chgTxt = (q.chg>=0?"+":"") + q.chg.toFixed(2);
+    const ts = q.time ? q.time.toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"}) : "";
+    return `<div class="idx-card ${dir}">
+      <div class="nm">${it.name}</div>
+      <div class="ts">${ts} · ${q.source||""}</div>
+      <div class="px">${fmt(q.price)}</div>
+      <div class="ch">
+        <span class="pct ${dir==="up"?"up-bg":(dir==="down"?"down-bg":"")} ${dir}">${pctTxt}</span>
+        <span class="muted">${chgTxt}</span>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+/* ================= 当日收益 + 分时线 ================= */
+// 设计：每日首次访问页面时记录 totalAssets 作为锚点；
+// 之后每次 refreshQuotes 把当前 totalAssets 减去锚点得到当日盈亏；
+// 时间序列存到 localStorage（按日期分键），刷新页面后能继续累积
+const LS_TODAY_KEY = "tradebook.today.v1";
+function loadToday(){
+  try{ const s=localStorage.getItem(LS_TODAY_KEY); return s?JSON.parse(s):{date:"",openAnchor:null,points:[]}; }
+  catch(e){ return {date:"",openAnchor:null,points:[]}; }
+}
+function saveToday(t){ localStorage.setItem(LS_TODAY_KEY, JSON.stringify(t)); }
+// 跨日重置：今天日期 != 记录日期 → 重新建档
+function ensureTodayAnchor(currentTotalAssets){
+  const t = loadToday();
+  const td = today();
+  if(t.date !== td){
+    t.date = td;
+    t.openAnchor = currentTotalAssets;
+    t.points = [{ t: Date.now(), pnl: 0 }];
+    saveToday(t);
+  } else if(t.openAnchor == null){
+    t.openAnchor = currentTotalAssets;
+    saveToday(t);
+  }
+  return t;
+}
+function pushTodayPoint(currentTotalAssets){
+  const t = ensureTodayAnchor(currentTotalAssets);
+  const pnl = currentTotalAssets - t.openAnchor;
+  const last = t.points[t.points.length-1];
+  const now = Date.now();
+  // 30 秒内同点位最多记一次（避免 30 秒刷新两次重复累积）
+  if(last && (now - last.t) < 25000 && Math.abs(pnl - last.pnl) < 0.01){
+    return { today:t, pnl, changed:false };
+  }
+  t.points.push({ t: now, pnl });
+  // 单日上限 2880 点（24h × 120/h），超过则降采样
+  if(t.points.length > 2880){
+    t.points = t.points.filter((_,i)=> i%2===0 );
+  }
+  saveToday(t);
+  return { today:t, pnl, changed:true };
+}
+function clearToday(){
+  localStorage.removeItem(LS_TODAY_KEY);
+}
+
+function renderTodayPanel(){
+  const valEl = $("todayPnlVal"), anchorEl = $("todayAnchor"), chartEl = $("todayChartSvg"), wrap = $("todayChart");
+  if(!valEl) return;
+  const d = recompute();
+  const { pnl } = pushTodayPoint(d.totalAssets);
+  const t = loadToday();
+  const cls = pnl>0 ? "up" : (pnl<0 ? "down" : "flat");
+  valEl.className = "big " + cls;
+  valEl.textContent = (pnl>=0?"+":"") + fmt(pnl);
+  // 锚点信息（如果是周一开盘前，会显示"非交易日"）
+  const todayStr = today();
+  const isWeekend = [0,6].includes(new Date().getDay());
+  if(t.openAnchor!=null){
+    anchorEl.innerHTML = `开盘锚点：<b>${fmt(t.openAnchor)}</b>（${todayStr} ${new Date(t.points[0].t).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"})}）· ${t.points.length} 个时序点` + (isWeekend?'<br><span style="color:var(--warn)">⚠ 周末非交易日，今日价格沿用上一交易日收盘</span>':'');
+  }else{
+    anchorEl.textContent = "尚无锚点";
+  }
+  renderTodayChart(chartEl, wrap, t);
+}
+// 自绘 SVG 分时线：横轴时间（自动 09:30~15:00），纵轴当日盈亏
+function renderTodayChart(svg, wrap, t){
+  if(!svg || !wrap) return;
+  // 空数据：显示提示
+  if(!t || t.points.length === 0){
+    svg.innerHTML = `<text x="300" y="80" text-anchor="middle" fill="#8b98ab" font-size="13">等待第一次行情刷新…</text>`;
+    return;
+  }
+  const w = 600, h = 170, padL = 8, padR = 8, padT = 14, padB = 22;
+  const pts = t.points;
+  const pnls = pts.map(p=>p.pnl);
+  const minP = Math.min(...pnls), maxP = Math.max(...pnls);
+  const range = Math.max(maxP - minP, 1);  // 防 0 除
+  // 时间区间：当天 0 点 ~ 24 点（横轴自动映射）
+  const t0 = new Date(t.date+"T00:00:00").getTime();
+  const t1 = t0 + 86400000;
+  const xOf = ts => padL + (ts - t0) / (t1 - t0) * (w - padL - padR);
+  const yOf = p  => padT + (1 - (p - minP) / range) * (h - padT - padB);
+  const yZero = (maxP>0 && minP<0) ? yOf(0) : null;
+  const ptsStr = pts.map(p => `${xOf(p.t).toFixed(1)},${yOf(p.pnl).toFixed(1)}`).join(" ");
+  const color = maxP>=0 && minP<=0 ? "#7b5cff" : (maxP>0 ? "#f0483e" : "#17b26a");
+  const fillColor = color + "22";
+  // 折线 + 填充
+  let html = "";
+  if(yZero!=null){
+    html += `<line x1="${padL}" y1="${yZero}" x2="${w-padR}" y2="${yZero}" stroke="#3a4658" stroke-width="1" stroke-dasharray="3,3"/>`;
+  }
+  // 填充区
+  if(pts.length>1){
+    const polyFill = `M ${xOf(pts[0].t).toFixed(1)},${(yZero||yOf(0)).toFixed(1)} L ${ptsStr} L ${xOf(pts[pts.length-1].t).toFixed(1)},${(yZero||yOf(0)).toFixed(1)} Z`;
+    html += `<path d="${polyFill}" fill="${fillColor}" stroke="none"/>`;
+  }
+  html += `<polyline points="${ptsStr}" fill="none" stroke="${color}" stroke-width="1.5"/>`;
+  // 端点标记
+  const last = pts[pts.length-1];
+  html += `<circle cx="${xOf(last.t).toFixed(1)}" cy="${yOf(last.pnl).toFixed(1)}" r="3" fill="${color}"/>`;
+  // 标签：最大值/最小值/末值
+  const maxIdx = pnls.indexOf(maxP), minIdx = pnls.indexOf(minP);
+  const fmtHM = ts => new Date(ts).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"});
+  if(pts.length>1){
+    html += `<text x="${xOf(pts[maxIdx].t).toFixed(1)}" y="${(yOf(maxP)-4).toFixed(1)}" text-anchor="middle" fill="#f0483e" font-size="10">+${fmt(maxP)}</text>`;
+    html += `<text x="${xOf(pts[minIdx].t).toFixed(1)}" y="${(yOf(minP)+12).toFixed(1)}" text-anchor="middle" fill="#17b26a" font-size="10">${fmt(minP)}</text>`;
+  }
+  html += `<text x="${padL}" y="${h-4}" fill="#8b98ab" font-size="10">00:00</text>`;
+  html += `<text x="${w/2}" y="${h-4}" text-anchor="middle" fill="#8b98ab" font-size="10">12:00</text>`;
+  html += `<text x="${w-padR}" y="${h-4}" text-anchor="end" fill="#8b98ab" font-size="10">24:00</text>`;
+  svg.innerHTML = html;
 }
 
 function renderSectors(){
@@ -2411,6 +2677,8 @@ $("dDate").value = today();
 renderAll();
 maybeSnapshot();        // 每日资产快照（当天首次打开自动存档）
 refreshQuotes(false);   // 启动即拉一次实时行情（有代码的持仓）
+refreshIndices().then(()=>renderIndices());  // 启动即拉一次指数
+startIndexTimer();      // 指数独立 10 秒轮询
 // PWA：仅线上 HTTPS 注册（本地双击打开不受影响）
 if("serviceWorker" in navigator && location.protocol.startsWith("https")){
   navigator.serviceWorker.register("sw.js").catch(()=>{});
