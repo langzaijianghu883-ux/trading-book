@@ -577,58 +577,108 @@ global.localStorage = {
   removeItem: k => { delete _lsStore[k]; }
 };
 const LS_TODAY_KEY_TEST = "tradebook.today.test";
-function loadTodayTest(){ try{ const s=localStorage.getItem(LS_TODAY_KEY_TEST); return s?JSON.parse(s):{date:"",openAnchor:null,points:[]}; }catch(e){ return {date:"",openAnchor:null,points:[]}; } }
+function loadTodayTest(){ try{ const s=localStorage.getItem(LS_TODAY_KEY_TEST); return s?JSON.parse(s):{date:"",prevDayAssets:null,prevDayDate:"",prevDayQuoteCount:0,prevDayFallbackCount:0,points:[]}; }catch(e){ return {date:"",prevDayAssets:null,prevDayDate:"",prevDayQuoteCount:0,prevDayFallbackCount:0,points:[]}; } }
 function saveTodayTest(t){ localStorage.setItem(LS_TODAY_KEY_TEST, JSON.stringify(t)); }
-function todayStr(){ const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")-"-"+String(d.getDate()).padStart(2,"0"); }
-function ensureTest(totalAssets){
+function todayStr(){ const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
+function ensureTestAnchor(anchorData){
+  // anchorData = { total, hasQuote, fallback }
   const t = loadTodayTest();
   const td = todayStr();
-  if(t.date !== td){
+  if(t.date !== td || t.prevDayAssets == null){
     t.date = td;
-    t.openAnchor = totalAssets;
-    t.points = [{ t: Date.now(), pnl: 0 }];
-    saveTodayTest(t);
-  } else if(t.openAnchor == null){
-    t.openAnchor = totalAssets;
+    t.prevDayAssets = anchorData.total;
+    t.prevDayQuoteCount = anchorData.hasQuote;
+    t.prevDayFallbackCount = anchorData.fallback;
+    t.points = [{ t: Date.now(), pnl: 0, pct: 0 }];
     saveTodayTest(t);
   }
   return t;
 }
-function pushTest(totalAssets){
-  const t = ensureTest(totalAssets);
-  const pnl = totalAssets - t.openAnchor;
+function pushTodayPointTest(currentTotalAssets){
+  const t = loadTodayTest();
+  if(t.prevDayAssets == null) return { pnl:0, pct:0, len:0, changed:false };
+  const pnl = currentTotalAssets - t.prevDayAssets;
+  const pct = t.prevDayAssets>0 ? (pnl / t.prevDayAssets * 100) : 0;
   const last = t.points[t.points.length-1];
   const now = Date.now();
   if(last && (now - last.t) < 25000 && Math.abs(pnl - last.pnl) < 0.01){
-    return { pnl, len:t.points.length, changed:false };
+    return { pnl, pct, len:t.points.length, changed:false };
   }
-  t.points.push({ t: now, pnl });
+  t.points.push({ t: now, pnl, pct });
   if(t.points.length > 2880){ t.points = t.points.filter((_,i)=> i%2===0); }
   saveTodayTest(t);
-  return { pnl, len:t.points.length, changed:true };
+  return { pnl, pct, len:t.points.length, changed:true };
 }
 
-// 测试 1：跨日切换重置锚点
+// 测试 1：跨日切换重置锚点（按新口径：锚点由 calcPrevDayAssets 决定）
 localStorage.removeItem(LS_TODAY_KEY_TEST);
-pushTest(100000);  // 锚点 = 100000
-let t1 = loadTodayTest();
-check("当日锚点-首次建档", t1.openAnchor, 100000);
+// 模拟：上一交易日总资产 100000（由 quoteMap 决定，不由传入参数）
+let anchorData = { total: 100000, hasQuote: 5, fallback: 0 };
+let t1 = ensureTestAnchor(anchorData);
+check("当日锚点-首次建档", t1.prevDayAssets, 100000);
+check("当日锚点-记录 prevDayQuoteCount", t1.prevDayQuoteCount, 5);
 check("当日锚点-初始 1 点", t1.points.length, 1);
 
-// 测试 2：总资产变化 → 当日盈亏 = 资产 - 锚点
-let tdy1 = pushTest(100500);
+// 测试 2：当前总资产 > 锚点 → 当日盈亏 = 差值 + 百分比
+let tdy1 = pushTodayPointTest(100500);
 check("当日盈亏-资产+500", tdy1.pnl, 500);
+check("当日盈亏-百分比+0.5%", tdy1.pct.toFixed(2), "0.50");
 check("当日盈亏-已累加点", tdy1.len, 2);
 
-// 测试 3：30 秒去重：同价位同时间窗口不重复追加
-let tdy2 = pushTest(100500);
-check("当日-30 秒去重", tdy2.changed, false);
-check("当日-30 秒去重长度不变", tdy2.len, 2);
+// 测试 3：当前总资产 < 锚点 → 负盈亏 + 负百分比
+let tdy2 = pushTodayPointTest(99800);
+check("当日盈亏-资产-200", tdy2.pnl, -200);
+check("当日盈亏-百分比-0.2%", tdy2.pct.toFixed(2), "-0.20");
 
-// 测试 4：触发追加（数值变化）
-let tdy3 = pushTest(100800);
-check("当日-数值变化触发追加", tdy3.changed, true);
-check("当日-数值变化后长度", tdy3.len, 3);
+// 测试 4：30 秒去重（同价位+短时间→不追加）
+let tdy3 = pushTodayPointTest(99800);   // 同 99800
+check("当日-30 秒去重-同价位 changed=false", tdy3.changed, false);
+check("当日-30 秒去重-长度不变", tdy3.len, 3);  // 之前已经 3（[{0},{500},{-200}]），这次不增
+
+// 测试 5：不同价位（+1000）触发追加
+let tdy4 = pushTodayPointTest(100800);
+check("当日-数值变化触发追加", tdy4.changed, true);
+check("当日-数值变化后长度", tdy4.len, 4);
+check("当日-百分比 +0.8%", tdy4.pct.toFixed(2), "0.80");
+
+// 测试 6：锚点 = 0 时的百分比保护
+localStorage.removeItem(LS_TODAY_KEY_TEST);
+ensureTestAnchor({ total: 0, hasQuote: 0, fallback: 0 });
+let tdy5 = pushTodayPointTest(100);
+check("当日-锚点为0时百分比=0", tdy5.pct, 0);
+
+// 测试 7：prevTradingDate 跳过周末
+// 周一（2026-08-24）→ 上一交易日 = 上周五 2026-08-21
+function prevTradingDateFromDate(d){
+  const dd = new Date(d); dd.setDate(dd.getDate()-1);
+  while([0,6].includes(dd.getDay())){ dd.setDate(dd.getDate()-1); }
+  return dd.getFullYear()+"-"+String(dd.getMonth()+1).padStart(2,"0")+"-"+String(dd.getDate()).padStart(2,"0");
+}
+check("prevDayDate-周一 → 上周五", prevTradingDateFromDate(new Date("2026-08-24T12:00:00")), "2026-08-21");
+check("prevDayDate-周六 → 上周五", prevTradingDateFromDate(new Date("2026-08-22T12:00:00")), "2026-08-21");
+check("prevDayDate-周日 → 上周五", prevTradingDateFromDate(new Date("2026-08-23T12:00:00")), "2026-08-21");
+check("prevDayDate-周二 → 周一", prevTradingDateFromDate(new Date("2026-08-25T12:00:00")), "2026-08-24");
+
+// 测试 8：calcPrevDayAssets 计算：Σ(数量×昨收)+现金，无昨收的按当前价兜底
+function calcPrevDayAssetsTest(holdings, cash, qm){
+  let mv=0, hasQuote=0, fallback=0;
+  for(const h of holdings){
+    const q = h.code && qm[h.code];
+    if(q && q.prevClose>0){ mv += h.shares * q.prevClose; hasQuote++; }
+    else { mv += h.shares * h.price; fallback++; }
+  }
+  return { total: mv+cash, hasQuote, fallback };
+}
+const qm1 = { sh688062:{prevClose:32.00}, sh600363:{prevClose:18.00} };
+const h1 = [
+  { code:"sh688062", shares:500, price:32.50 },     // 500*32=16000
+  { code:"sh600363", shares:400, price:18.50 },     // 400*18=7200
+  { code:"",        shares:100, price:50.00 }       // 无代码 fallback: 5000
+];
+const pd = calcPrevDayAssetsTest(h1, 100000, qm1);
+check("calcPrevDayAssets-持仓合计", pd.total, 16000+7200+5000+100000);
+check("calcPrevDayAssets-使用昨收数", pd.hasQuote, 2);
+check("calcPrevDayAssets-fallback 数", pd.fallback, 1);
 
 // 测试 5：指数列表完整性
 const INDEX_LIST_TEST = [

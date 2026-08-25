@@ -95,6 +95,10 @@
   .today-panel{display:grid;grid-template-columns:280px 1fr;gap:14px;margin-bottom:14px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px}
   .today-stats{display:flex;flex-direction:column;gap:10px;justify-content:center}
   .today-stats .big{font-size:32px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+  .today-stats .pct{font-size:15px;font-weight:600;font-variant-numeric:tabular-nums;margin-top:2px}
+  .today-stats .pct.up{color:var(--up)}
+  .today-stats .pct.down{color:var(--down)}
+  .today-stats .pct.flat{color:var(--muted)}
   .today-stats .lbl{font-size:12.5px;color:var(--muted);margin-bottom:-4px}
   .today-stats .open-anchor{font-size:12px;color:var(--muted);line-height:1.5}
   .today-stats .open-anchor b{color:var(--text);font-weight:600}
@@ -313,7 +317,8 @@
       <div class="today-stats">
         <div class="lbl">当日盈亏（实时）</div>
         <div class="big" id="todayPnlVal">—</div>
-        <div class="open-anchor" id="todayAnchor">以今日首次访问时的总资产为基准，每 30 秒随行情刷新</div>
+        <div class="pct" id="todayPnlPct">—</div>
+        <div class="open-anchor" id="todayAnchor">基准为上一交易日收盘价 × 持仓 + 现金，每 30 秒随行情刷新</div>
       </div>
       <div class="today-chart" id="todayChart">
         <svg id="todayChartSvg" viewBox="0 0 600 170" preserveAspectRatio="none"></svg>
@@ -1429,46 +1434,73 @@ function renderIndices(){
 }
 
 /* ================= 当日收益 + 分时线 ================= */
-// 设计：每日首次访问页面时记录 totalAssets 作为锚点；
-// 之后每次 refreshQuotes 把当前 totalAssets 减去锚点得到当日盈亏；
-// 时间序列存到 localStorage（按日期分键），刷新页面后能继续累积
-const LS_TODAY_KEY = "tradebook.today.v1";
+// 设计：锚点 = 上一交易日收盘时的账户总资产 = Σ(持仓数量 × 昨收价) + 可用余额
+// 当日盈亏 = 当前总资产 − 锚点（持仓数量不变，价格变动产生的纯涨跌）
+// 当日盈亏百分比 = 当日盈亏 / 锚点 × 100%
+// 时间序列存到 localStorage（按日期分键），跨日自动重建
+const LS_TODAY_KEY = "tradebook.today.v2";
 function loadToday(){
-  try{ const s=localStorage.getItem(LS_TODAY_KEY); return s?JSON.parse(s):{date:"",openAnchor:null,points:[]}; }
-  catch(e){ return {date:"",openAnchor:null,points:[]}; }
+  try{ const s=localStorage.getItem(LS_TODAY_KEY); return s?JSON.parse(s):{date:"",prevDayAssets:null,prevDayDate:"",points:[]}; }
+  catch(e){ return {date:"",prevDayAssets:null,prevDayDate:"",points:[]}; }
 }
 function saveToday(t){ localStorage.setItem(LS_TODAY_KEY, JSON.stringify(t)); }
-// 跨日重置：今天日期 != 记录日期 → 重新建档
-function ensureTodayAnchor(currentTotalAssets){
+// 计算"上一交易日账户总资产"：Σ(持仓数量 × 昨收价) + 可用余额
+// 现金不参与价格变动；无昨收价的持仓按当前价兜底（视为不变）
+function calcPrevDayAssets(){
+  let mv = 0, hasQuote = 0, fallback = 0;
+  for(const h of state.holdings){
+    const q = h.code && quoteMap[h.code];
+    if(q && q.prevClose>0){
+      mv += h.shares * q.prevClose;
+      hasQuote++;
+    }else{
+      mv += h.shares * h.price;     // 无昨收价：用当前价（视为无变动）
+      fallback++;
+    }
+  }
+  return { total: mv + state.cash, hasQuote, fallback };
+}
+// 上一交易日日期：取上一交易日（跳过周末）；无昨收行情时回退到昨天
+function prevTradingDate(){
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  // 跳过周末（周六=6 / 周日=0）
+  while([0,6].includes(d.getDay())){ d.setDate(d.getDate()-1); }
+  return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");
+}
+// 跨日重置：今天日期 != 记录日期 → 用 prevClose 重建锚点
+function ensureTodayAnchor(){
   const t = loadToday();
   const td = today();
-  if(t.date !== td){
+  if(t.date !== td || t.prevDayAssets == null){
     t.date = td;
-    t.openAnchor = currentTotalAssets;
-    t.points = [{ t: Date.now(), pnl: 0 }];
-    saveToday(t);
-  } else if(t.openAnchor == null){
-    t.openAnchor = currentTotalAssets;
+    const pd = calcPrevDayAssets();
+    t.prevDayAssets = pd.total;
+    t.prevDayDate = prevTradingDate();
+    t.prevDayQuoteCount = pd.hasQuote;
+    t.prevDayFallbackCount = pd.fallback;
+    t.points = [{ t: Date.now(), pnl: 0, pct: 0 }];
     saveToday(t);
   }
   return t;
 }
 function pushTodayPoint(currentTotalAssets){
-  const t = ensureTodayAnchor(currentTotalAssets);
-  const pnl = currentTotalAssets - t.openAnchor;
+  const t = ensureTodayAnchor();
+  const pnl = currentTotalAssets - t.prevDayAssets;
+  const pct = t.prevDayAssets>0 ? (pnl / t.prevDayAssets * 100) : 0;
   const last = t.points[t.points.length-1];
   const now = Date.now();
-  // 30 秒内同点位最多记一次（避免 30 秒刷新两次重复累积）
+  // 30 秒内同价位不重复追加
   if(last && (now - last.t) < 25000 && Math.abs(pnl - last.pnl) < 0.01){
-    return { today:t, pnl, changed:false };
+    return { today:t, pnl, pct, changed:false };
   }
-  t.points.push({ t: now, pnl });
+  t.points.push({ t: now, pnl, pct });
   // 单日上限 2880 点（24h × 120/h），超过则降采样
   if(t.points.length > 2880){
     t.points = t.points.filter((_,i)=> i%2===0 );
   }
   saveToday(t);
-  return { today:t, pnl, changed:true };
+  return { today:t, pnl, pct, changed:true };
 }
 function clearToday(){
   localStorage.removeItem(LS_TODAY_KEY);
@@ -1478,18 +1510,24 @@ function renderTodayPanel(){
   const valEl = $("todayPnlVal"), anchorEl = $("todayAnchor"), chartEl = $("todayChartSvg"), wrap = $("todayChart");
   if(!valEl) return;
   const d = recompute();
-  const { pnl } = pushTodayPoint(d.totalAssets);
+  const { pnl, pct } = pushTodayPoint(d.totalAssets);
   const t = loadToday();
   const cls = pnl>0 ? "up" : (pnl<0 ? "down" : "flat");
   valEl.className = "big " + cls;
   valEl.textContent = (pnl>=0?"+":"") + fmt(pnl);
-  // 锚点信息（如果是周一开盘前，会显示"非交易日"）
-  const todayStr = today();
+  // 百分比（带 ± 号）
+  const pctEl = $("todayPnlPct");
+  if(pctEl){
+    pctEl.className = "pct " + cls;
+    pctEl.textContent = (pct>=0?"+":"") + pct.toFixed(2) + "%";
+  }
+  // 锚点信息
   const isWeekend = [0,6].includes(new Date().getDay());
-  if(t.openAnchor!=null){
-    anchorEl.innerHTML = `开盘锚点：<b>${fmt(t.openAnchor)}</b>（${todayStr} ${new Date(t.points[0].t).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"})}）· ${t.points.length} 个时序点` + (isWeekend?'<br><span style="color:var(--warn)">⚠ 周末非交易日，今日价格沿用上一交易日收盘</span>':'');
+  const fbMsg = (t.prevDayFallbackCount||0) > 0 ? ` · <span style="color:var(--warn)">${t.prevDayFallbackCount} 个持仓无昨收价，按当前价兜底</span>` : "";
+  if(t.prevDayAssets!=null){
+    anchorEl.innerHTML = `基准：<b>${fmt(t.prevDayAssets)}</b>（${t.prevDayDate||prevTradingDate()} 收盘价 × 持仓 + 现金）· ${t.prevDayQuoteCount||0} 个持仓使用昨收${fbMsg}<br><span class="muted">${t.points.length} 个时序点</span>` + (isWeekend?'<br><span style="color:var(--warn)">⚠ 周末非交易日，今日价格沿用上一交易日收盘</span>':'');
   }else{
-    anchorEl.textContent = "尚无锚点";
+    anchorEl.textContent = "尚无基准（等待行情拉取）";
   }
   renderTodayChart(chartEl, wrap, t);
 }
