@@ -1434,19 +1434,19 @@ function renderIndices(){
 }
 
 /* ================= 当日收益 + 分时线 ================= */
-// 设计：锚点 = 上一交易日收盘时的账户总资产 = Σ(持仓数量 × 昨收价) + 可用余额
-// 当日盈亏 = 当前总资产 − 锚点（持仓数量不变，价格变动产生的纯涨跌）
+// 设计：锚点 = 上一交易日收盘时的持仓市值 = Σ(持仓数量 × 昨收价)
+// 当日盈亏 = 当前持仓市值 − 锚点（仅反映持仓价格波动，不受出入金干扰）
 // 当日盈亏百分比 = 当日盈亏 / 锚点 × 100%
 // 时间序列存到 localStorage（按日期分键），跨日自动重建
-const LS_TODAY_KEY = "tradebook.today.v2";
+const LS_TODAY_KEY = "tradebook.today.v3";
 function loadToday(){
-  try{ const s=localStorage.getItem(LS_TODAY_KEY); return s?JSON.parse(s):{date:"",prevDayAssets:null,prevDayDate:"",points:[]}; }
-  catch(e){ return {date:"",prevDayAssets:null,prevDayDate:"",points:[]}; }
+  try{ const s=localStorage.getItem(LS_TODAY_KEY); return s?JSON.parse(s):{date:"",prevDayMV:null,prevDayDate:"",points:[]}; }
+  catch(e){ return {date:"",prevDayMV:null,prevDayDate:"",points:[]}; }
 }
 function saveToday(t){ localStorage.setItem(LS_TODAY_KEY, JSON.stringify(t)); }
-// 计算"上一交易日账户总资产"：Σ(持仓数量 × 昨收价) + 可用余额
-// 现金不参与价格变动；无昨收价的持仓按当前价兜底（视为不变）
-function calcPrevDayAssets(){
+// 计算"上一交易日持仓市值"：Σ(持仓数量 × 昨收价)
+// 现金不参与；无昨收价的持仓按当前价兜底（视为不变）
+function calcPrevDaySnapshot(){
   let mv = 0, hasQuote = 0, fallback = 0;
   for(const h of state.holdings){
     const q = h.code && quoteMap[h.code];
@@ -1458,7 +1458,7 @@ function calcPrevDayAssets(){
       fallback++;
     }
   }
-  return { total: mv + state.cash, hasQuote, fallback };
+  return { mv, hasQuote, fallback };
 }
 // 上一交易日日期：取上一交易日（跳过周末）；无昨收行情时回退到昨天
 function prevTradingDate(){
@@ -1472,10 +1472,10 @@ function prevTradingDate(){
 function ensureTodayAnchor(){
   const t = loadToday();
   const td = today();
-  if(t.date !== td || t.prevDayAssets == null){
+  if(t.date !== td || t.prevDayMV == null){
     t.date = td;
-    const pd = calcPrevDayAssets();
-    t.prevDayAssets = pd.total;
+    const pd = calcPrevDaySnapshot();
+    t.prevDayMV = pd.mv;
     t.prevDayDate = prevTradingDate();
     t.prevDayQuoteCount = pd.hasQuote;
     t.prevDayFallbackCount = pd.fallback;
@@ -1484,33 +1484,37 @@ function ensureTodayAnchor(){
   }
   return t;
 }
-function pushTodayPoint(currentTotalAssets){
+// currentMV: 当前持仓市值（不含可用余额）
+// cashChanged: 现金进出标记（true 表示本次有出入金，pnl 不变，但记录一次跳变以提示）
+function pushTodayPoint(currentMV, cashChanged){
   const t = ensureTodayAnchor();
-  const pnl = currentTotalAssets - t.prevDayAssets;
-  const pct = t.prevDayAssets>0 ? (pnl / t.prevDayAssets * 100) : 0;
+  const pnl = currentMV - t.prevDayMV;
+  const pct = t.prevDayMV>0 ? (pnl / t.prevDayMV * 100) : 0;
   const last = t.points[t.points.length-1];
   const now = Date.now();
   // 30 秒内同价位不重复追加
   if(last && (now - last.t) < 25000 && Math.abs(pnl - last.pnl) < 0.01){
     return { today:t, pnl, pct, changed:false };
   }
-  t.points.push({ t: now, pnl, pct });
+  const meta = cashChanged ? { cashFlow: true } : null;
+  t.points.push({ t: now, pnl, pct, meta });
   // 单日上限 2880 点（24h × 120/h），超过则降采样
   if(t.points.length > 2880){
     t.points = t.points.filter((_,i)=> i%2===0 );
   }
   saveToday(t);
-  return { today:t, pnl, pct, changed:true };
+  return { today:t, pnl, pct, changed:true, cashChanged: !!cashChanged };
 }
 function clearToday(){
   localStorage.removeItem(LS_TODAY_KEY);
 }
 
-function renderTodayPanel(){
+function renderTodayPanel(cashChanged){
   const valEl = $("todayPnlVal"), anchorEl = $("todayAnchor"), chartEl = $("todayChartSvg"), wrap = $("todayChart");
   if(!valEl) return;
   const d = recompute();
-  const { pnl, pct } = pushTodayPoint(d.totalAssets);
+  // 当前持仓市值 = d.totalMV（不含现金）
+  const { pnl, pct } = pushTodayPoint(d.totalMV, cashChanged);
   const t = loadToday();
   const cls = pnl>0 ? "up" : (pnl<0 ? "down" : "flat");
   valEl.className = "big " + cls;
@@ -1524,8 +1528,9 @@ function renderTodayPanel(){
   // 锚点信息
   const isWeekend = [0,6].includes(new Date().getDay());
   const fbMsg = (t.prevDayFallbackCount||0) > 0 ? ` · <span style="color:var(--warn)">${t.prevDayFallbackCount} 个持仓无昨收价，按当前价兜底</span>` : "";
-  if(t.prevDayAssets!=null){
-    anchorEl.innerHTML = `基准：<b>${fmt(t.prevDayAssets)}</b>（${t.prevDayDate||prevTradingDate()} 收盘价 × 持仓 + 现金）· ${t.prevDayQuoteCount||0} 个持仓使用昨收${fbMsg}<br><span class="muted">${t.points.length} 个时序点</span>` + (isWeekend?'<br><span style="color:var(--warn)">⚠ 周末非交易日，今日价格沿用上一交易日收盘</span>':'');
+  const cashMsg = cashChanged ? ' · <span style="color:var(--blue)">本次出入金未计入盈亏</span>' : '';
+  if(t.prevDayMV!=null){
+    anchorEl.innerHTML = `基准：<b>${fmt(t.prevDayMV)}</b>（${t.prevDayDate||prevTradingDate()} 收盘价 × 持仓 · 不含现金）· ${t.prevDayQuoteCount||0} 个持仓使用昨收${fbMsg}${cashMsg}<br><span class="muted">${t.points.length} 个时序点</span>` + (isWeekend?'<br><span style="color:var(--warn)">⚠ 周末非交易日，今日价格沿用上一交易日收盘</span>':'');
   }else{
     anchorEl.textContent = "尚无基准（等待行情拉取）";
   }
@@ -2260,7 +2265,7 @@ $("btnAddCashFlow").addEventListener("click", ()=>{
   if(amount<=0) return toast("请填写正确的金额");
   const flow = addCashFlow(cfSide, date, amount, note);
   if(!flow) return toast("出金金额超过当前可用余额（"+fmt(state.cash)+"），无法记录");
-  save(); renderAll();
+  save(); renderAll(); renderTodayPanel(true);
   $("cfAmount").value=""; $("cfNote").value="";
   toast("已记录"+(cfSide==="in"?"入金":"出金")+" "+fmt(amount)+"，可用余额已更新");
 });
@@ -2272,7 +2277,7 @@ $("cashFlowList").addEventListener("click", e=>{
   if(!f) return;
   if(!confirm("删除这笔"+(f.type==="in"?"入金":"出金")+" "+fmt(f.amount)+"并回滚可用余额？")) return;
   deleteCashFlow(id);
-  save(); renderAll();
+  save(); renderAll(); renderTodayPanel(true);
   toast("已删除并回滚余额");
 });
 
@@ -2605,7 +2610,7 @@ $("cashConfirm").addEventListener("click", ()=>{
       note:"手动调整余额", cashBefore:state.cash, cashAfter:v, createdAt:Date.now()});
   }
   replayCash();
-  save(); renderAll(); $("cashModal").classList.remove("show");
+  save(); renderAll(); renderTodayPanel(true); $("cashModal").classList.remove("show");
   toast("可用余额已更新为 "+fmt(v));
 });
 $("cashModal").addEventListener("click", e=>{ if(e.target===e.currentTarget) $("cashModal").classList.remove("show"); });
